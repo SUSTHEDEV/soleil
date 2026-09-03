@@ -191,11 +191,10 @@ function AST.Type(type_name, nullable)
     }
 end
 
-function AST.UnionType(type_a, type_b)
+function AST.UnionType(type_table)
     return {
         type = "UnionType",
-        type_a = type_a,
-        type_b = type_b
+        types = type_table
     }
 end
 

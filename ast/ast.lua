@@ -2,11 +2,11 @@
 local AST = {}
 
 -- Statements
-function AST.LocalDeclaration(name, value, declaration_type)
+function AST.LocalDeclaration(names, values, declaration_type)
     return {
         type = "LocalDeclaration",
-        name = name,
-        value = value,
+        names = names,              -- list of Identifier nodes
+        values = values,            -- list of expression nodes (empty = plain declaration)
         declaration_type = declaration_type
     }
 end

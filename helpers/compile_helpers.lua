@@ -19,9 +19,15 @@ function Helpers.print_ast(node, indent)
     elseif node.type == "Nil" then
         print(indent .. "Nil")
     elseif node.type == "LocalDeclaration" then
-        print(indent .. "LocalDeclaration: " .. (node.name and node.name.name or "?"))
-        print(indent .. "  value:")
-        Helpers.print_ast(node.value, indent .. "    ")
+        local names = {}
+        for _, n in ipairs(node.names or {}) do
+            names[#names + 1] = n.name
+        end
+        print(indent .. "LocalDeclaration: " .. table.concat(names, ", "))
+        for _, v in ipairs(node.values or {}) do
+            print(indent .. "  value:")
+            Helpers.print_ast(v, indent .. "    ")
+        end
     elseif node.type == "IfStatement" then
         print(indent .. "IfStatement")
         print(indent .. "  condition:")

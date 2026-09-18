@@ -1,0 +1,15 @@
+# Soleil compiler build configuration
+# Loaded by config/config.lua; every key is optional — defaults shown.
+
+[build]
+target = "5.1"        # Lua target version for generated code
+optimize = false      # enable optimization passes after checking
+features = ["interpreter", "lua2sol", "flattentheheterogeneous"]  # features to enable; see below for details
+build_type = "bytecode-only" # soleilc build types: bytecode-only or bundled
+
+# explanation:
+# interpreter: run Soleil code directly in the interpreter (no compilation)
+# lua2sol: compile Lua code to Soleil code so that you wouldn't have to rewrite stuff
+# flatheterogeneous / FTH: T2T sub-compiler that allows heterogeneous tables / classes to be flattened into explicit access to save some milliseconds when executing
+# stdlib: bundles a Soleil written standard library shim module (don't use this!!!)
+# youareanidiot: insults you for every compile / linter error it catches

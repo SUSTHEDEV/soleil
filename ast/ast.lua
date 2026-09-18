@@ -11,20 +11,22 @@ function AST.LocalDeclaration(names, values, declaration_type)
     }
 end
 
-function AST.Assignment(variables, values)
+function AST.Assignment(variables, values, value_type)
     return {
         type = "Assignment",
         variables = variables,
-        values = values
+        values = values,
+        value_type = value_type
     }
 end
 
-function AST.FunctionDeclaration(name, parameters, body)
+function AST.FunctionDeclaration(name, parameters, body, return_type)
     return {
         type = "FunctionDeclaration",
         name = name,
         parameters = parameters,
-        body = body
+        body = body,
+        return_type = return_type   -- type node or nil (untyped)
     }
 end
 
@@ -111,11 +113,12 @@ function AST.UnaryOp(operator, operand)
     }
 end
 
-function AST.FunctionCall(func, arguments)
+function AST.FunctionCall(func, arguments, return_type)
     return {
         type = "FunctionCall",
         func = func,
-        arguments = arguments
+        arguments = arguments,
+        return_type = return_type
     }
 end
 
@@ -213,6 +216,14 @@ function AST.MethodCall(object, method_name, arguments)
         object = object,
         method_name = method_name,
         arguments = arguments
+    }
+end
+
+function AST.Param(name, param_type)
+    return {
+        type = "Param",
+        name = name,              -- Identifier
+        param_type = param_type   -- type node or nil (untyped)
     }
 end
 

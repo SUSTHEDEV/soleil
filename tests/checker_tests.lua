@@ -57,6 +57,23 @@ local valid = {
   -- functions parse & declare (call checking is Step 3)
   "local f = function(x : number) : number return x end",
   "function g(a, b : string) end",
+  -- Step 3: call checking end-to-end
+  "local f = function(x : number) : number return x end\nlocal n : number = f(1)",
+  "local f = function(x : number?) : number? return x end\nf()",
+  "local c = true\nfunction g() : number if c then return 1 else return 2 end end",
+  "function g() : number? end",
+  -- Step 4: stdlib records, receivers, iterators
+  "print(\"hi\", 1, nil)",
+  "local s = \"abc\"\nlocal n : number = s:len()",
+  "local s = \"abc\"\nlocal t : string = s:sub(1, 2)",
+  "local t : string = string.sub(\"abc\", 1, 2)",
+  "local s : string = tostring(5)",
+  "local n : number? = tonumber(\"x\")",
+  "local t = {}\nsetmetatable(t, {})",
+  "pcall(print, 1)",
+  "local t : table[string, number] = {}\nfor k, v in pairs(t) do local n2 : number = v end",
+  "local t : table[string] = {}\nfor i, v in ipairs(t) do local s2 : string = v end",
+  "local t : table[string] = {}\nfor i, v, ghost in ipairs(t) do local n2 : number = i end",
 }
 
 -- fix the any-echo case: needs `a` declared first
@@ -79,7 +96,22 @@ local invalid = {
   { "local x = 1 + \"a\"",                     "needs numbers" },
   { "local x = \"a\" - \"b\"",                 "needs numbers" },
   { "local s : number = \"a\" .. \"b\"",       "cannot initialize" },      -- .. yields string
-  { "print(x)",                                "undefined variable" },     -- stdlib not seeded yet
+  { "print(x)",                                "undefined variable" },
+  -- Step 3: call contract
+  { "local f = function(x : number) : number return x end\nlocal n : number = f(\"s\")", "argument 1 type mismatch" },
+  { "local f = function(x : number) : number return x end\nf(1, 2)", "too many arguments" },
+  { "local f = function(x : number) : number return x end\nf()", "missing argument" },
+  { "function g() : number end",               "all paths to return" },
+  { "local bad = 5\nbad(1)",                   "calling a non-function value" },
+  { "local x = ...",                           "outside a varargs function" },
+  -- Step 4: stdlib
+  { "local s = \"abc\"\nlocal n : number = s:len() + \"x\"", "needs numbers" },
+  { "local s = \"abc\"\ns:sub(\"x\")",                  "argument 1 type mismatch" },
+  { "local s = \"abc\"\ns:nope()",                        "no such member" },
+  { "string.nope()",                           "no such member" },
+  { "local t : table[string, number] = {}\nfor k, v in pairs(t) do local s2 : string = v end", "cannot initialize" },
+  { "local t : table[string, number] = {}\nfor i, v in ipairs(t) do end", "requires an array table" },
+  { "local t : table[string] = {}\nfor i, v, ghost in ipairs(t) do local n : string = ghost end", "cannot initialize" },
 }
 
 -- ---------------------------------------------------------------------------

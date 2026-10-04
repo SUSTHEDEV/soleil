@@ -3,6 +3,7 @@
 -- expression types, and checks them against declarations (SPEC §2-§5).
 -- Loud by contract: every violation raises with a line number.
 
+local stdlib = require("checker.stdlib") -- header for stdlib type checking
 local Checker = {}
 
 -- ===========================================================================
@@ -12,6 +13,7 @@ local Checker = {}
 --       | { kind = "function", params = {T,...}, ret = T, varargs = boolean }
 --       | { kind = "union", members = {T,...} }        -- nil-ness lives in members
 --       | { kind = "class", name = string }            -- §4, future
+--       | { kind = "record", fields = {name -> T}} -- reserved for header files
 -- ===========================================================================
 
 local function prim(name) return { kind = "primitive", name = name } end
@@ -19,6 +21,9 @@ local T_NUMBER, T_STRING, T_BOOLEAN = prim("number"), prim("string"), prim("bool
 local T_NIL, T_ANY = prim("nil"), prim("any")
 
 local function union(members) return { kind = "union", members = members } end
+local function record(fields) return { kind = "record", fields = fields } end
+
+local options = require("config.config")
 
 local describe  -- forward
 describe = function(t)
@@ -32,6 +37,9 @@ describe = function(t)
         return table.concat(parts, " | ")
     end
     if t.kind == "function" then return "function" end
+
+    if t.kind == "record" then return "record" end
+
     return t.kind
 end
 
@@ -43,6 +51,22 @@ local function contains_nil(t)
     if t.kind ~= "union" then return is_nil(t) end
     for _, m in ipairs(t.members) do
         if is_nil(m) then return true end
+    end
+    return false
+end
+
+local function definitely_returns(stmts) -- very trust me bro feature, indeed
+    for _, s in ipairs(stmts) do
+        if s.type == "ReturnStatement" then return true end
+        if s.type == "Block" and definitely_returns(s.statements) then return true end
+        if s.type == "IfStatement" and s.elseBlock then
+            -- both branches must provably return; elseif chains nest in elseBlock
+            if definitely_returns(s.thenBlock.statements)
+               and (s.elseBlock.type ~= "Block"          -- nested elseif chain
+                    or definitely_returns(s.elseBlock.statements)) then
+                return true
+            end
+        end
     end
     return false
 end
@@ -121,7 +145,7 @@ compatible = function(src, dst)
         if src.form ~= dst.form then return false end
         return compatible(src.key, dst.key) and compatible(src.value, dst.value)
     end
-
+    if src.kind == "record" or dst.kind == "record" then return src == dst end
     return false
 end
 
@@ -129,8 +153,17 @@ end
 -- 4. SCOPE CHAIN — block-structured symbol table
 -- ===========================================================================
 
-local function new_scope(parent, in_loop)
-    return { vars = {}, parent = parent, in_loop = in_loop or false }
+local function new_scope(parent, in_loop, fn_ret)
+    return { vars = {}, parent = parent, in_loop = in_loop or false, fn_ret = fn_ret }
+end
+
+local function current_ret(scope)
+    local s = scope
+    while s do
+        if s.fn_ret ~= nil then return s.fn_ret, s end
+        s = s.parent
+    end
+    return nil, nil
 end
 
 local function declare(scope, name, t)
@@ -147,6 +180,43 @@ local function lookup(scope, name)
     return nil
 end
 
+local check_stmt, infer_expr  -- mutually recursive
+
+local function type_error(msg, node)
+    local where = ""
+    if node and node.line then where = " at line " .. node.line end
+    error("type error" .. where .. ": " .. msg)
+end
+
+local function check_fn_body(node, fn_type, parent_scope)
+    if not node.body then
+        -- method signature (interface / abstract class): no body to walk,
+        -- and signatures are exempt from all-paths-return by nature
+        return
+    end
+    local fn_scope = new_scope(parent_scope, false, fn_type.ret)
+    for _, p in ipairs(node.parameters) do
+        if p.type == "Param" then
+            local pt = p.param_type and from_ast(p.param_type) or T_ANY
+            fn_type.params[#fn_type.params + 1] = pt
+            declare(fn_scope, p.name.name, pt)
+        else
+            fn_type.varargs = true
+            fn_scope.in_varargs = true
+        end
+    end
+    for _, s in ipairs(node.body.statements) do
+        check_stmt(s, fn_scope)
+    end
+    if node.return_type and not contains_nil(fn_type.ret)
+       and not (fn_type.ret.kind == "primitive" and fn_type.ret.name == "any") then
+        if not definitely_returns(node.body.statements) then
+            type_error("declared return type requires all paths to return a value", node)
+        end
+    end
+end
+
+
 local function in_loop(scope)
     local s = scope
     while s do
@@ -160,17 +230,11 @@ end
 -- 5. ERRORS — loud, line-anchored
 -- ===========================================================================
 
-local function type_error(msg, node)
-    local where = ""
-    if node and node.line then where = " at line " .. node.line end
-    error("type error" .. where .. ": " .. msg)
-end
 
 -- ===========================================================================
 -- 6. THE WALK
 -- ===========================================================================
 
-local check_stmt, infer_expr  -- mutually recursive
 
 -- infer_expr(node, scope) -> T  — the type of an expression, or raise
 infer_expr = function(node, scope)
@@ -180,7 +244,12 @@ infer_expr = function(node, scope)
     if kind == "String" then return T_STRING end
     if kind == "Boolean" then return T_BOOLEAN end
     if kind == "Nil" then return T_NIL end
-    if kind == "VarArgs" then return T_ANY end
+    if kind == "VarArgs" then
+        if not scope.in_varargs then
+            type_error("'...' used outside a varargs function", node)
+        end
+        return T_ANY
+    end
 
     if kind == "Identifier" then
         local t = lookup(scope, node.name)
@@ -249,6 +318,16 @@ infer_expr = function(node, scope)
         if not node.via_dot then
             infer_expr(node.index, scope)   -- t[k]: the index is a real expression
         end                                  -- t.k: the index is a literal key name
+        if t.kind == "record" then
+            if node.via_dot then
+                local member = t.fields[node.index.name]
+                if not member then
+                    type_error("no such member '" .. node.index.name .. "'", node)
+                end
+                return member
+            end
+            return T_ANY   -- record["expr"]: conservative, can't know the key
+        end
         if t.kind == "table" then
             if contains_nil(t.value) then return t.value end
             return union({ t.value, T_NIL })
@@ -258,28 +337,94 @@ infer_expr = function(node, scope)
 
     if kind == "FunctionCall" then
         local ft = infer_expr(node.func, scope)
-        -- TODO (Step 3, §5): check ft is a function type, arity, arg types
-        for _, a in ipairs(node.arguments) do infer_expr(a, scope) end
-        return T_ANY
+        if ft.kind ~= "function" then
+            if ft.kind == "primitive" and ft.name == "any" then
+                for _, a in ipairs(node.arguments) do infer_expr(a, scope) end
+                return T_ANY                     -- untyped callee: check args, trust result
+            end
+            type_error("calling a non-function value (" .. describe(ft) .. ")", node)
+        end
+        if not ft.varargs then
+            if #node.arguments > #ft.params then
+                type_error("too many arguments: expected " .. #ft.params, node)
+            end
+            -- missing arguments pass nil: legal only for nullable/any params
+            for i = #node.arguments + 1, #ft.params do
+                local pt = ft.params[i]
+                if not (pt.kind == "primitive" and pt.name == "any") and not contains_nil(pt) then
+                    type_error("missing argument " .. i, node)
+                end
+            end
+        end
+        for i, a in ipairs(node.arguments) do
+            if ft.params[i] and not compatible(infer_expr(a, scope), ft.params[i]) then
+                type_error("argument " .. i .. " type mismatch", node)
+            end
+        end
+        return ft.ret or T_ANY
     end
 
     if kind == "MethodCall" then
-        infer_expr(node.object, scope)
-        -- TODO (Step 3): resolve method on the object's type
-        for _, a in ipairs(node.arguments) do infer_expr(a, scope) end
-        return T_ANY
+        local obj_t = infer_expr(node.object, scope)
+        local mt = obj_t
+        local ns = nil
+        if obj_t.kind == "record" then
+            ns = obj_t                                    -- namespace object itself
+        elseif obj_t.kind == "primitive" and obj_t.name == "string" then
+            ns = lookup(scope, "string")                  -- string methods live in the string record
+        end
+        if ns and ns.kind == "record" then
+            local member = ns.fields[node.method_name.name]
+            if not member then
+                type_error("no such member '" .. node.method_name.name .. "'", node)
+            end
+            if member.kind == "function" then
+                if not member.varargs and #node.arguments + 1 > #member.params then
+                    type_error("too many arguments", node)
+                end
+                for i, a in ipairs(node.arguments) do
+                    local ptype = member.params[i + 1]   -- param 1 = the receiver
+                    if ptype and not compatible(infer_expr(a, scope), ptype) then
+                        type_error("argument " .. i .. " type mismatch", node)
+                    end
+                end
+                return member.ret or T_ANY
+            end
+            return member.ret or T_ANY                   -- non-function member value
+        end
+        if mt.kind == "table" then
+            mt = mt.value                        -- method = the value stored under the key
+        end
+        if mt.kind ~= "function" then
+            if mt.kind == "primitive" and mt.name == "any" then
+                for _, a in ipairs(node.arguments) do infer_expr(a, scope) end
+                return T_ANY
+            end
+            type_error("method '" .. node.method_name.name .. "' is not a function", node)
+        end
+        if not mt.varargs and #node.arguments + 1 > #mt.params then
+            type_error("too many arguments: expected " .. (#mt.params - 1) ..
+                       ", got " .. #node.arguments, node)
+        end
+        for i, a in ipairs(node.arguments) do
+            local ptype = mt.params[i + 1]       -- +1 skips implicit self (param 1)
+            if ptype and not compatible(infer_expr(a, scope), ptype) then
+                type_error("argument " .. i .. " type mismatch", node)
+            end
+        end
+        return mt.ret or T_ANY
     end
 
     if kind == "FunctionDeclaration" then
-        -- anonymous function in expression position: build its function type
-        local params = {}
-        for _, p in ipairs(node.parameters) do
-            params[#params + 1] = p.param_type and from_ast(p.param_type) or T_ANY
-        end
-        -- TODO (Step 3): child scope, check body, all-paths-return (§5)
-        return { kind = "function", params = params,
-                 ret = node.return_type and from_ast(node.return_type) or T_ANY,
-                 varargs = false }
+        local fn_type = { kind = "function", params = {},
+                          ret = node.return_type and from_ast(node.return_type) or T_ANY,
+                          varargs = false }
+        check_fn_body(node, fn_type, scope)
+        return fn_type                                          -- the type IS the result
+    end
+
+    if kind == "ClassDeclaration" then
+        local fn_type = {kind = "class"}
     end
 
     type_error("checker: cannot infer expression type '" .. kind .. "'", node)
@@ -384,20 +529,34 @@ check_stmt = function(node, scope)
     end
 
     if kind == "ForInLoop" then
-        for _, it in ipairs(node.iterators) do
-            infer_expr(it, scope)
+        local kt, vt = T_ANY, T_ANY
+        local first = node.iterators[1]
+        if first and first.type == "FunctionCall" and first.func.type == "Identifier"
+           and (first.func.name == "ipairs" or first.func.name == "pairs") then
+            local tt = first.arguments[1] and infer_expr(first.arguments[1], scope)
+            if tt and tt.kind == "table" then
+                if first.func.name == "ipairs" then
+                    kt, vt = T_NUMBER, tt.value
+                    if tt.form == "map" then
+                        type_error("ipairs requires an array table", first)
+                    end
+                else
+                    kt, vt = tt.key, tt.value
+                end
+            end
+        else
+            for _, it in ipairs(node.iterators) do infer_expr(it, scope) end
         end
         local body_scope = new_scope(scope, true)
-        for _, v in ipairs(node.variables) do
-            -- TODO (Step 4): iterator types from pairs/ipairs signatures
-            declare(body_scope, v.name, T_ANY)
+        local var_types = { kt, vt }
+        for i, v in ipairs(node.variables) do
+            declare(body_scope, v.name, var_types[i] or T_NIL)   -- 3rd+ vars are always nil
         end
         for _, s in ipairs(node.body.statements) do
             check_stmt(s, body_scope)
         end
         return
     end
-
     if kind == "Block" then
         local body_scope = new_scope(scope)
         for _, s in ipairs(node.statements) do
@@ -407,10 +566,17 @@ check_stmt = function(node, scope)
     end
 
     if kind == "ReturnStatement" then
-        for _, v in ipairs(node.values) do
-            infer_expr(v, scope)
+        local ret, ctx = current_ret(scope)
+        local inferred = T_NIL                       -- no values = returning nil
+        if #node.values == 1 then
+            inferred = infer_expr(node.values[1], scope)
+        elseif #node.values > 1 then
+            for _, v in ipairs(node.values) do infer_expr(v, scope) end
+            inferred = T_ANY                          -- TODO: tuple types
         end
-        -- TODO (Step 3, §5): check values against the enclosing function's return type
+        if ret and ret ~= false and not compatible(inferred, ret) then
+            type_error("return type mismatch", node)
+        end
         return
     end
 
@@ -423,28 +589,17 @@ check_stmt = function(node, scope)
     end
 
     if kind == "FunctionDeclaration" then
-        -- named function: build type, declare, then check body in a child scope
-        local params = {}
-        for _, p in ipairs(node.parameters) do
-            params[#params + 1] = p.param_type and from_ast(p.param_type) or T_ANY
-        end
-        local fn_type = {
-            kind = "function",
-            params = params,
-            ret = node.return_type and from_ast(node.return_type) or T_ANY,
-            varargs = false,
-        }
+        -- named function: build type, declare, then check body via the shared helper
+        local fn_type = { kind = "function", params = {},
+                          ret = node.return_type and from_ast(node.return_type) or T_ANY,
+                          varargs = false }
         if node.name then
-            -- dotted names (a.b.c) are pre-declared by earlier code — v1: simple names only
+            if node.name.type ~= "Identifier" then
+                type_error("dotted function declarations are not supported yet — assign an anonymous function instead", node)
+            end
             declare(scope, node.name.name, fn_type)
         end
-        local fn_scope = new_scope(scope)
-        for i, p in ipairs(node.parameters) do
-            declare(fn_scope, p.name.name, params[i])
-        end
-        for _, s in ipairs(node.body.statements) do
-            check_stmt(s, fn_scope)
-        end
+        check_fn_body(node, fn_type, scope)
         return
     end
 
@@ -457,22 +612,22 @@ check_stmt = function(node, scope)
 end
 
 -- Checker.check(ast_nodes) — entry point: a list of top-level statements
-function Checker.check(ast_nodes)
+function Checker.check(ast_nodes, meta)
     local global_scope = new_scope(nil)
-    -- minimal stdlib stubs — real signatures are Step 4 (§7)
-    declare(global_scope, "print", T_ANY)
-    declare(global_scope, "pairs", T_ANY)
-    declare(global_scope, "ipairs", T_ANY)
-    declare(global_scope, "type", T_ANY)
-    declare(global_scope, "tostring", T_ANY)
-    declare(global_scope, "tonumber", T_ANY)
-    declare(global_scope, "error", T_ANY)
-    declare(global_scope, "pcall", T_ANY)
-    declare(global_scope, "setmetatable", T_ANY)
-    declare(global_scope, "getmetatable", T_ANY)
-    declare(global_scope, "string", T_ANY)
-    declare(global_scope, "math", T_ANY)
-    declare(global_scope, "table", T_ANY)
+    for name, t in pairs(stdlib) do
+        declare(global_scope, name, t)
+    end
+    if meta and meta.incomplete and #meta.incomplete > 0 then
+        if not options.allow_incomplete then
+            local first = meta.incomplete[1]
+            error("refusing to fully check: file is marked INCOMPLETE (" ..
+                #meta.incomplete .. " marker(s), first at line " .. first.line .. ")")
+        end
+        -- lenient mode: report, don't refuse
+        for _, m in ipairs(meta.incomplete) do
+            parse_warn("incomplete: " .. (m.reason or "no reason given") .. " (line " .. m.line .. ")")
+        end
+    end
     for _, stmt in ipairs(ast_nodes) do
         check_stmt(stmt, global_scope)
     end

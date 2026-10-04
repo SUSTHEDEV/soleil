@@ -77,6 +77,8 @@ local valid = {
   "local t = {1, 2, 3}",
   "local t = {[k] = v}",
   "local t = {1, a = 2, [x] = 3}",
+  "local `class` = 5\n`class` = 6\nprint(`class`)",   -- backtick-escaped identifier
+  "local `data` = {}\n`data`.x = 1",
   "do x = 1 end",
   "do local x = 1; y = 2; end",
   "local s = a .. b",
@@ -136,6 +138,9 @@ local malformed = {
   "local x = 1e",
   -- string edge cases that must not silently pass
   "local s = \"abc",
+  "local `function` = 1",     -- Lua keywords cannot be escaped
+  "local `` = 1",             -- empty escape
+  "local `class = 1",         -- unclosed escape
   "local s = \"bad\\q\"",
   "local x = f(1,)",
   "for i = 1, , 2 do end",

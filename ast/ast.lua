@@ -20,13 +20,15 @@ function AST.Assignment(variables, values, value_type)
     }
 end
 
-function AST.FunctionDeclaration(name, parameters, body, return_type)
+function AST.FunctionDeclaration(name, parameters, body, return_type, abstract, overrides)
     return {
         type = "FunctionDeclaration",
         name = name,
         parameters = parameters,
         body = body,
-        return_type = return_type   -- type node or nil (untyped)
+        return_type = return_type,   -- type node or nil (untyped)
+        abstract = abstract, -- for abstract methods in classes
+        overrides = overrides or false -- for method overrides in classes
     }
 end
 
@@ -224,6 +226,20 @@ function AST.Param(name, param_type)
         type = "Param",
         name = name,              -- Identifier
         param_type = param_type   -- type node or nil (untyped)
+    }
+end
+
+function AST.ClassDeclaration(name, params, body, abstract, singleton, class_type, extends_name, extends_args)
+    return {
+        type = "ClassDeclaration",
+        name = name,              -- Identifier
+        params = params,           -- list of Param nodes
+        body = body,               -- Block
+        abstract = abstract,
+        singleton = singleton,
+        class_type = class_type, -- "class" | "interface" | "data"
+        extends_name = extends_name,   -- Identifier or nil
+        extends_args = extends_args,   -- {expression...} or nil
     }
 end
 

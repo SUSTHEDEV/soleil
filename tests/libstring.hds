@@ -1,0 +1,16 @@
+#!INCOMPLETE: 3 of 12 functions could not be typed — string.format vararg args unresolved
+-- libstring.hds — declarations for Lua's string library (generated draft)
+-- empty bodies are external: the checker trusts these signatures
+
+function string.sub(s : string, i : number, j : number?) : string end
+
+function string.rep(s : string, n : number) : string end
+
+function string.len(s : string) : number end
+
+--#!INCOMPLETE: format's vararg argument types depend on the format string — unparsed
+function string.format(fmt : string, ...) : string end
+
+function string.upper(s : string) : string end
+
+function string.byte(s : string, i : number?, j : number?) : number, ... end

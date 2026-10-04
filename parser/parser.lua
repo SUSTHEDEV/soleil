@@ -32,6 +32,20 @@ local reserved_keywords = {
     -- Reserving them breaks real Lua code that uses them as identifiers.
 }
 
+-- Soleil-only keywords: reserved in soleil dialect, ordinary identifiers in
+-- lua dialect. "self" is deliberately absent (SPEC §4 rule 2).
+local soleil_keywords = {
+    ["class"] = true,
+    ["extends"] = true,
+    ["super"] = true,
+    ["interface"] = true,
+    ["implements"] = true,
+    ["abstract"] = true,
+    ["override"] = true,
+    ["data"] = true,
+    ["object"] = true,
+}
+
 local ESCAPES = {
     ["n"] = "\n", ["t"] = "\t", ["r"] = "\r", ["a"] = "\a",
     ["b"] = "\b", ["f"] = "\f", ["v"] = "\v",
@@ -63,6 +77,9 @@ local reserved_symbols = {
     ["."] = lpeg.P("."),
     [","] = lpeg.P(","),
     [":"] = lpeg.P(":"),
+    ["?."] = lpeg.P("?."),
+    ["?:"] = lpeg.P("?:"),
+    ["!!"] = lpeg.P("!!")
 } -- same as above
 
 function laxed_error(message)
@@ -84,14 +101,23 @@ function parse_warn(message)
 end
 
 -- Simple tokenizer
-local function tokenize(input)
+local function tokenize(input, dialect)
+    dialect = dialect or "soleil"     -- the compiler's own language
+    if dialect ~= "soleil" and dialect ~= "lua" then
+        parse_error("unknown dialect: " .. tostring(dialect))
+    end
     local cursor = 1
     local tokens = {}
     local line = 1
+    local markers = {}
 
     -- shebang: Lua ignores a first line starting with '#'
-    if input:sub(1, 1) == "#" then
+     if input:sub(1, 1) == "#" then
         local nl = input:find("\n", 1, true)
+        local first_line = input:sub(1, (nl or #input + 1) - 1)
+        if first_line:match("^#!%s*INCOMPLETE") then
+            markers[#markers + 1] = { line = 1, reason = first_line }
+        end
         cursor = nl and (nl + 1) or (#input + 1)
         if nl then line = line + 1 end
     end
@@ -184,6 +210,24 @@ local function tokenize(input)
                 value = table.concat(parts),
                 line = line
             })
+          -- Backtick-escaped identifiers: `class` — Soleil reserved words as names.
+        -- Lua keywords cannot be escaped (they could never emit as valid Lua).
+        elseif char == "`" then
+            local close = input:find("`", cursor + 1, true)
+            if not close or close == cursor + 1 then
+                parse_error("expected identifier between backticks")
+            end
+            local word = input:sub(cursor + 1, close - 1)
+            if reserved_keywords[word] then
+                parse_error("Lua keyword '" .. word .. "' cannot be escaped with backticks")
+            end
+            table.insert(tokens, {
+                type = "IDENTIFIER",
+                value = word,
+                escaped = true,     -- diagnostics/headersgen can tell it apart later
+                line = line
+            })
+            cursor = close + 1
         -- Match identifiers and keywords (letters or _)
         elseif char:match("[a-zA-Z_]") then
             local word_start = cursor
@@ -191,8 +235,8 @@ local function tokenize(input)
                 cursor = cursor + 1
             end
             local word = input:sub(word_start, cursor - 1)
-            
-            if reserved_keywords[word] then
+
+            if reserved_keywords[word] or (dialect == "soleil" and soleil_keywords[word]) then
                 table.insert(tokens, {
                     type = "KEYWORD",
                     value = word,
@@ -251,10 +295,10 @@ local function tokenize(input)
         end
     end
     
-    return tokens
+    return tokens, markers
 end
 
-function parse(tokens)
+function parse(tokens, markers)
     local ast_nodes = {}  -- collect ALL nodes
     local i = 1  -- cursor position
     local parse_expression, parse_statement, parse_if_statement  -- forward declarations
@@ -300,36 +344,7 @@ function parse(tokens)
             if not (i <= #tokens and tokens[i].type == "SYMBOL" and tokens[i].value == "(") then
                 parse_error("expected '(' after function name")
             end
-            i = i + 1  -- skip '('
-            local args = {}
-            local has_varargs = false
-            while i <= #tokens and not (tokens[i].type == "SYMBOL" and tokens[i].value == ")") do
-                if tokens[i].type == "SYMBOL" and tokens[i].value == "..." then
-                    i = i + 1
-                    has_varargs = true
-                elseif tokens[i].type == "IDENTIFIER" then
-                    local pname = ast.Identifier(tokens[i].value)
-                    i = i + 1
-                    local ptype
-                    if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == ":" then
-                        i = i + 1                       -- the param consumes ':'
-                        ptype = parse_type()
-                    end
-                    table.insert(args, ast.Param(pname, ptype)) 
-                else      
-                    parse_error("expected parameter name")             
-                end
-                if i <= #tokens and tokens[i].type == "SYMBOL" and tokens[i].value == "," then
-                    i = i + 1
-                end
-            end
-            if has_varargs then
-                table.insert(args, ast.VarArgs())   -- always last: {a, b, VarArgs}
-            end
-            if not (i <= #tokens and tokens[i].type == "SYMBOL" and tokens[i].value == ")") then
-                parse_error("expected ')'")
-            end
-            i = i + 1  -- skip ')'
+            args, has_varargs = parse_params()
             if is_method then
                 table.insert(args, 1, ast.Param(ast.Identifier("self"), nil))  -- function a:b() gets implicit self
             end
@@ -776,6 +791,14 @@ function parse(tokens)
             return parse_assignment()  -- Handle assignments and function calls
         elseif token.type == "KEYWORD" and token.value == "function" then
             return parse_expression()  -- function expression as a statement
+        elseif token.type == "KEYWORD" and (token.value == "class" or token.value == "interface" or token.value == "data" or token.value == "object") then
+            return parse_class(token.value)
+        elseif token.type == "KEYWORD" and token.value == "abstract" then
+            i = i + 1
+            if not (tokens[i] and tokens[i].value == "class") then
+                parse_error("expected 'class' after 'abstract'")
+            end
+            return parse_class("class", true)
         elseif i <= #tokens and token.type == "KEYWORD" and token.value == "return" then
             i = i + 1  -- skip 'return'
             local return_values = {}
@@ -948,7 +971,9 @@ function parse(tokens)
                 i = i + 1
                 local value = parse_expression()
                 if not value then parse_error("expected value after '='") end
-                table.insert(fields, ast.TableField(key, value))
+                local field = ast.TableField(key, value)
+                field.computed = true    -- {[k] = v}: key is an expression, not the name
+                table.insert(fields, field)
 
             else
                 -- positional entry: {1, 2} / {"x"} / {f()} — no key
@@ -964,6 +989,130 @@ function parse(tokens)
         end
         i = i + 1  -- skip '}'
         return ast.TableConstruction(fields)
+    end
+
+    -- parses '(' params ')' — shared by functions and class headers.
+    -- returns { params = {...}, varargs = boolean }
+    function parse_params()
+        i = i + 1  -- skip '('
+        local params = {}
+        local varargs = false
+        while i <= #tokens and not (tokens[i].type == "SYMBOL" and tokens[i].value == ")") do
+            if tokens[i].type == "SYMBOL" and tokens[i].value == "..." then
+                i = i + 1
+                varargs = true
+            elseif tokens[i].type == "IDENTIFIER" then
+                local pname = ast.Identifier(tokens[i].value)
+                i = i + 1
+                local ptype
+                if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == ":" then
+                    i = i + 1                       -- the param consumes ':'
+                    ptype = parse_type()
+                end
+                table.insert(params, ast.Param(pname, ptype))
+            else
+                parse_error("expected parameter name")
+            end
+            if i <= #tokens and tokens[i].type == "SYMBOL" and tokens[i].value == "," then
+                i = i + 1
+            end
+        end
+        if varargs then
+            table.insert(params, ast.VarArgs())     -- always last: {a, b, VarArgs}
+        end
+        if not (i <= #tokens and tokens[i].type == "SYMBOL" and tokens[i].value == ")") then
+            parse_error("expected ')'")
+        end
+        i = i + 1  -- skip ')'
+        return params, varargs
+    end
+
+    function parse_class(kind, abstract)
+        if kind ~= "class" and kind ~= "interface" and kind ~= "data" and kind ~= "object" then
+            parse_error("expected 'class', 'interface', or 'data'")
+        end
+        local token = tokens[i]
+        local class_line = token.line
+        i = i + 1
+        if not (tokens[i] and tokens[i].type == "IDENTIFIER") then
+            parse_error("expected " .. kind .. " name")
+        end
+        local class_name = ast.Identifier(tokens[i].value)
+        i = i + 1
+
+        -- header params: illegal on interface and object, required on data, optional on class
+        local params, param_varargs = {}, false
+        if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "(" then
+            if kind == "interface" or kind == "object" then
+                --[[
+                    - Currently for interfaces v1, as interface v2 will add support for required construction parameters
+                    - Singleton classes (objects) can never have construction parameters
+                ]]
+                parse_error(kind.."s cannot have constructor parameters") 
+            end
+            params, param_varargs = parse_params()
+            if param_varargs then
+                parse_error("class parameters cannot be varargs")
+            end
+        elseif kind == "data" then
+            parse_error("data classes require constructor parameters")
+        end
+
+        -- extends: classes only, as name + optional args
+        local extends_name, extends_args
+        if tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "extends" then
+            if kind ~= "class" then
+                parse_error("only classes can extend another class")
+            end
+            i = i + 1
+            if not (tokens[i] and tokens[i].type == "IDENTIFIER") then
+                parse_error("expected superclass name after 'extends'")
+            end
+            extends_name = ast.Identifier(tokens[i].value)
+            i = i + 1
+            if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "(" then
+                extends_args = parse_args()
+            end
+        end
+
+        -- member loop: only [override] function members until 'end'
+        local members = {}
+        local seen = {}
+        while i <= #tokens and not (tokens[i].type == "KEYWORD" and tokens[i].value == "end") do
+            if kind == "data" then
+                parse_error("data classes cannot have methods (in class '" .. class_name.name .. "')")
+            end
+            local is_override = false
+            if tokens[i].type == "KEYWORD" and tokens[i].value == "override" then
+                i = i + 1
+                is_override = true
+            end
+            if not (tokens[i].type == "KEYWORD" and tokens[i].value == "function") then
+                parse_error("expected function member or 'end' in " .. kind .. " body")
+            end
+            local fn = parse_primary()
+            if not fn.name then
+                parse_error("class methods must be named")
+            end
+            fn.overrides = is_override
+            if seen[fn.name.name] then
+                parse_error("duplicate method '" .. fn.name.name .. "' in class '"
+                    .. class_name.name .. "'")
+            end
+            seen[fn.name.name] = true
+            table.insert(members, fn)
+        end
+
+        if not (tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "end") then
+            parse_error("expected 'end' after " .. kind .. " body")
+        end
+        i = i + 1
+        local is_singleton = false
+        if kind == "object" then
+            is_singleton = true
+        end
+        return at(ast.ClassDeclaration(class_name, params, ast.Block(members),
+                    abstract,is_singleton, kind, extends_name, extends_args), class_line)
     end
 
     while i <= #tokens do
@@ -1064,6 +1213,15 @@ function parse(tokens)
         elseif token.type == "SYMBOL" and token.value == "(" then
             -- parenthesized expression statement: (function() end)() etc.
             table.insert(ast_nodes, parse_assignment())
+        elseif token.type == "KEYWORD" and (token.value == "class"
+               or token.value == "interface" or token.value == "data" or token.value == "object") then
+            table.insert(ast_nodes, parse_class(token.value))
+        elseif token.type == "KEYWORD" and token.value == "abstract" then
+            i = i + 1
+            if not (tokens[i] and tokens[i].value == "class") then
+                parse_error("expected 'class' after 'abstract'")
+            end
+            table.insert(ast_nodes, parse_class("class", true))
         elseif token.type == "SYMBOL" and token.value == "{" then
         parse_error("unexpected '{' — a table constructor is an expression, not a statement")
         else
@@ -1075,7 +1233,7 @@ function parse(tokens)
         end
     end
     
-    return ast_nodes  -- return the array of nodes
+    return ast_nodes, { incomplete = markers or {} }  -- nodes + incomplete markers
 end
 
 return {

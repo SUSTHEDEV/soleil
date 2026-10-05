@@ -45,6 +45,8 @@ local soleil_keywords = {
     ["data"] = true,
     ["object"] = true,
 }
+local current_class_name = nil
+local allow_signature = false   -- true while parsing an interface body
 
 local ESCAPES = {
     ["n"] = "\n", ["t"] = "\t", ["r"] = "\r", ["a"] = "\a",
@@ -141,10 +143,14 @@ local function tokenize(input, dialect)
                 local c_span = cursor
                 cursor = close + #c_close_pat
                 line = line + select(2, input:sub(c_span, cursor - 1):gsub("\n", ""))
-            else                                     -- line comment
-                while cursor <= #input and input:sub(cursor, cursor) ~= "\n" do
-                    cursor = cursor + 1
+            else
+                -- line comment: capture inline INCOMPLETE markers
+                local line_end = input:find("\n", cursor, true) or (#input + 1)
+                local text = input:sub(cursor, line_end - 1)
+                if text:match("^#!%s*INCOMPLETE") then
+                    markers[#markers + 1] = { line = line, reason = "--" .. text }
                 end
+                cursor = line_end
             end
         -- Match numbers (0-9, e-notation, hex, float)
         elseif char:match("%d") or (char == "." and input:sub(cursor + 1, cursor + 1):match("%d")) then
@@ -348,17 +354,30 @@ function parse(tokens, markers)
             if is_method then
                 table.insert(args, 1, ast.Param(ast.Identifier("self"), nil))  -- function a:b() gets implicit self
             end
-            local return_type
+            local return_types
             if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == ":" then
                 i = i + 1
-                return_type = parse_type()
+                return_types = { parse_type() }
+                while tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "," do
+                    i = i + 1
+                    return_types[#return_types + 1] = parse_type()
+                end
+            end
+            if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == ":" then
+                i = i + 1
+                return_types = parse_type()
+            end
+            if allow_signature and tokens[i] and tokens[i].type == "KEYWORD"
+               and tokens[i].value == "end" then
+                -- interface signature: no body — FunctionDeclaration with nil body
+                return at(ast.FunctionDeclaration(func_name, args, nil, return_types, false), fn_line)
             end
             local body = parse_block{ ["end"] = true }
             if not tokens[i] or tokens[i].type ~= "KEYWORD" or tokens[i].value ~= "end" then
                 parse_error("expected 'end' after function body")
             end
             i = i + 1  -- skip 'end'
-            return at(ast.FunctionDeclaration(func_name, args, body, return_type), fn_line)
+            return at(ast.FunctionDeclaration(func_name, args, body, return_types), fn_line)
         elseif i <= #tokens and token.type == "IDENTIFIER" then
             -- calls, method calls, and indexing are postfix now (parse_postfix)
             i = i + 1
@@ -369,6 +388,24 @@ function parse(tokens, markers)
         elseif i <= #tokens and token.type == "KEYWORD" and token.value == "nil" then
             i = i + 1
             return ast.Nil()
+                elseif i <= #tokens and token.type == "KEYWORD" and token.value == "super" then
+            i = i + 1
+            if not current_class_name then
+                parse_error("'super' used outside of a class")
+            end
+            if not (tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == ".") then
+                parse_error("expected '.' after 'super'")
+            end
+            i = i + 1
+            if not (tokens[i] and tokens[i].type == "IDENTIFIER") then
+                parse_error("expected method name after 'super.'")
+            end
+            local mname = ast.Identifier(tokens[i].value)
+            i = i + 1
+            if not (tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "(") then
+                parse_error("expected '(' after 'super." .. mname.name .. "'")
+            end
+            return at(ast.SuperCall(mname, parse_args()), token.line)
         elseif token.type == "SYMBOL" and token.value == "{" then
             return parse_table()
         elseif i <= #tokens and token.type == "SYMBOL" and token.value == "(" then
@@ -799,6 +836,8 @@ function parse(tokens, markers)
                 parse_error("expected 'class' after 'abstract'")
             end
             return parse_class("class", true)
+        elseif token.type == "KEYWORD" and token.value == "super" then
+            return parse_assignment()   -- super.m(self) as an expression statement
         elseif i <= #tokens and token.type == "KEYWORD" and token.value == "return" then
             i = i + 1  -- skip 'return'
             local return_values = {}
@@ -1001,6 +1040,10 @@ function parse(tokens, markers)
             if tokens[i].type == "SYMBOL" and tokens[i].value == "..." then
                 i = i + 1
                 varargs = true
+                if not (i <= #tokens and tokens[i].type == "SYMBOL"
+                        and tokens[i].value == ")") then
+                    parse_error("varargs '...' must be the last parameter")
+                end
             elseif tokens[i].type == "IDENTIFIER" then
                 local pname = ast.Identifier(tokens[i].value)
                 i = i + 1
@@ -1043,7 +1086,7 @@ function parse(tokens, markers)
         -- header params: illegal on interface and object, required on data, optional on class
         local params, param_varargs = {}, false
         if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "(" then
-            if kind == "interface" or kind == "object" then
+            if kind == "object" then
                 --[[
                     - Currently for interfaces v1, as interface v2 will add support for required construction parameters
                     - Singleton classes (objects) can never have construction parameters
@@ -1078,6 +1121,10 @@ function parse(tokens, markers)
         -- member loop: only [override] function members until 'end'
         local members = {}
         local seen = {}
+        local saved_class = current_class_name
+        local saved_signature = allow_signature
+        current_class_name = class_name.name
+        allow_signature = (kind == "interface") or abstract
         while i <= #tokens and not (tokens[i].type == "KEYWORD" and tokens[i].value == "end") do
             if kind == "data" then
                 parse_error("data classes cannot have methods (in class '" .. class_name.name .. "')")
@@ -1100,9 +1147,14 @@ function parse(tokens, markers)
                     .. class_name.name .. "'")
             end
             seen[fn.name.name] = true
+            if kind == "interface" and fn.body and #fn.body.statements > 0 then
+                parse_error("interface methods cannot have bodies (in interface '"
+                    .. class_name.name .. "')")
+            end
             table.insert(members, fn)
         end
-
+        current_class_name = saved_class
+        allow_signature = saved_signature
         if not (tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "end") then
             parse_error("expected 'end' after " .. kind .. " body")
         end

@@ -20,13 +20,13 @@ function AST.Assignment(variables, values, value_type)
     }
 end
 
-function AST.FunctionDeclaration(name, parameters, body, return_type, abstract, overrides)
+function AST.FunctionDeclaration(name, parameters, body, return_types, abstract, overrides)
     return {
         type = "FunctionDeclaration",
         name = name,
         parameters = parameters,
         body = body,
-        return_type = return_type,   -- type node or nil (untyped)
+        return_types = return_types,   -- type node or nil (untyped)
         abstract = abstract, -- for abstract methods in classes
         overrides = overrides or false -- for method overrides in classes
     }
@@ -121,6 +121,14 @@ function AST.FunctionCall(func, arguments, return_type)
         func = func,
         arguments = arguments,
         return_type = return_type
+    }
+end
+
+function AST.SuperCall(method_name, arguments)
+    return {
+        type = "SuperCall",
+        method_name = method_name,   -- Identifier
+        arguments = arguments        -- {expression...} — self is explicit per rule 8
     }
 end
 

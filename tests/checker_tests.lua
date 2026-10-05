@@ -74,6 +74,30 @@ local valid = {
   "local t : table[string, number] = {}\nfor k, v in pairs(t) do local n2 : number = v end",
   "local t : table[string] = {}\nfor i, v in ipairs(t) do local s2 : string = v end",
   "local t : table[string] = {}\nfor i, v, ghost in ipairs(t) do local n2 : number = i end",
+  -- unknown: flows in, checkpointed out
+  "local x : unknown = 5",
+  "local x : unknown = \"s\"",
+  "local x : unknown = 5\nlocal a : any = x",
+  "local x : unknown = 5\nlocal s : string = tostring(x)",
+  -- classes: declare, instantiate, methods, fields
+  "class Player(name : string?, id : number) function say(self : Player, msg : string) print(msg) end end\nlocal p : Player = Player(\"bob\", 42)\np:say(\"hi\")\nlocal n : number = p.id",
+  "class Player(name : string?, id : number) function say(self : Player, msg : string) print(msg) end end\nlocal p : Player? = nil",
+  "data Pair(a : number, b : number) end",
+  "object Counter function inc(self, x : number) : number return x end end",
+  "interface Shape(name : string)\n    function area(self : Shape) : number\nend\nclass Circle(x : number, name : string) extends Shape\n    function area(self : Circle) : number return self.x end\nend",
+  -- inheritance + rule 7 + super
+  "class Player(name : string?) function say(self : Player) end end\nclass A extends Player(\"\") override function say(self : A) end end",
+  "class Player(name : string?) function say(self : Player) end end\nclass A extends Player(\"\") override function say(self : A) super.say(self) end end",
+  -- multi-return types
+  "function g() : number return 1 end\nlocal n : number = g()",
+  "function h() : number, string return 1, \"a\" end\nlocal n : number = h()",
+  "local f = function() : number, string return 1, \"a\" end\nlocal n : number = f()",
+  "interface I\n    function area(self : I) : number\nend\nclass C extends I\n    function area(self : C) : number return 1 end\nend",
+  "class B(x : number) function two(self : B) : number, string return 1, \"s\" end end\nclass A extends B(x)\n    override function two(self : A) : number, string return 1, \"s\" end\nend",
+  -- call-ret propagation
+  "function get() : number, string return 1, \"a\" end\nfunction f2() : number, string return get() end",
+  "function f() : number, string return 1, \"a\" end\nlocal a, b = f()\nlocal s : string = b",
+  "local f = function(x : number) : number return x end\nlocal n : number = f(7)",
 }
 
 -- fix the any-echo case: needs `a` declared first
@@ -112,6 +136,38 @@ local invalid = {
   { "local t : table[string, number] = {}\nfor k, v in pairs(t) do local s2 : string = v end", "cannot initialize" },
   { "local t : table[string, number] = {}\nfor i, v in ipairs(t) do end", "requires an array table" },
   { "local t : table[string] = {}\nfor i, v, ghost in ipairs(t) do local n : string = ghost end", "cannot initialize" },
+  -- unknown: out only to itself or any
+  { "local x : unknown = 5\nlocal n : number = x", "cannot initialize" },
+  { "local x : unknown = 5\nlocal n = x + 1", "needs numbers" },
+  { "local x : unknown = 5\nlocal v = x.k", "cannot index" },
+  { "local x : unknown = 5\nx()", "calling a non-function" },
+  -- classes: field trust, rule 3, constructors, methods
+  { "class Player(name : string?, id : number) function say(self : Player, msg : string) print(msg) end end\nlocal p : Player = Player(\"bob\", 42)\nlocal s : string = p.id", "cannot initialize" },
+  { "class Player(name : string?, id : number) function say(self : Player, msg : string) print(msg) end end\nlocal p : Player = Player(\"bob\", 42)\nlocal s : string = p.zzz", "no such field" },
+  { "class Player(name : string?, id : number) function say(self : Player, msg : string) print(msg) end end\nlocal p : Player = Player(\"bob\")", "expected 2 constructor arguments" },
+  { "class Player(name : string?, id : number) function say(self : Player, msg : string) print(msg) end end\nlocal p : Player = Player(\"bob\", \"s\")", "constructor argument 'id' type mismatch" },
+  { "class Player(name : string?, id : number) function say(self : Player, msg : string) print(msg) end end\nlocal p : Player = Player(\"bob\", 42)\np:fly()", "no such method" },
+  { "class Player(name : string?, id : number) function say(self : Player, msg : string) print(msg) end end\nlocal p : Player = Player(\"bob\", 42)\np:say(42)", "argument 1 type mismatch" },
+  { "interface Shape(name : string)\n    function area(self : Shape) : number\nend\nlocal s : Shape = Shape(\"x\")", "cannot be instantiated" },
+  -- inheritance + rule 7 + super
+  { "class Player(name : string?) function say(self : Player) end end\nclass A extends Player(\"\") override function fly(self : A) end end", "overrides nothing" },
+  { "class Player(name : string?) function say(self : Player) end end\nclass A extends Player(\"\") function say(self : A) end end", "must be declared with 'override'" },
+  { "class Player(name : string?) function say(self : Player) end end\nclass A extends Player(\"\") override function say(self : A) super.say() end end", "expects 1 arguments" },
+  { "class L function f(self : L) super.f(self) end end", "has no superclass" },
+  -- interfaces: satisfaction
+  { "interface Shape(name : string)\n    function area(self : Shape) : number\nend\nclass Circle(x : number) extends Shape\nend", "does not implement" },
+  { "interface Shape(name : string)\n    function area(self : Shape) : number\nend\nclass Circle(x : number, name : string) extends Shape\n    function area(self : Circle) : string return \"s\" end\nend", "incompatible return type" },
+  { "interface Shape function area(self : Shape) : number return 1 end end", "cannot have bodies" },
+  -- call-ret propagation
+  { "function get() : number, number return 1, 2 end\nfunction f2() : number, string return get() end", "return 2 type mismatch" },
+  { "function get() : number return 1 end\nfunction f2() : number, string return get() end", "missing return value 2" },
+  { "function f() : number, string return 1, \"a\" end\nlocal a, b = f()\nlocal n : number = b", "cannot initialize" },
+  { "local f = function(x : number) : number return x end\nlocal n : number = f(\"s\")", "argument 1 type mismatch" },
+  -- multi-return types
+  { "local f = function() : string return 1 end",                 "return 1 type mismatch" },
+  { "function g() : number return 1 end\nlocal s : string = g()", "cannot initialize" },
+  { "function h() : number, string return 1, \"a\" end\nlocal s : string = h()", "cannot initialize" },
+  { "function h() : number, string return 1 end",                 "missing return value 2" },
 }
 
 -- ---------------------------------------------------------------------------

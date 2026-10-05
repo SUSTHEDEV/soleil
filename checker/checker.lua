@@ -18,10 +18,19 @@ local Checker = {}
 
 local function prim(name) return { kind = "primitive", name = name } end
 local T_NUMBER, T_STRING, T_BOOLEAN = prim("number"), prim("string"), prim("boolean")
-local T_NIL, T_ANY = prim("nil"), prim("any")
+local T_NIL, T_ANY, T_UNKNOWN = prim("nil"), prim("any"), prim("unknown")
 
 local function union(members) return { kind = "union", members = members } end
-local function record(fields) return { kind = "record", fields = fields } end
+local function record(fields) return { kind = "record", fields = fields } end -- kind of internal, not the same as data classes
+local function class(name, class_type, abstract, fields, methods, base_class) return { 
+    kind = "class",
+    name = name,
+    class_type = class_type, -- valid types are: class, interface, object and data
+    abstract = abstract, -- is it abstract (reminder: data classes, objects and interfaces cannot be abstract)?
+    fields = fields, 
+    methods = methods, 
+    base_class = base_class -- the base class's table that this class extends
+} end
 
 local options = require("config.config")
 
@@ -40,6 +49,7 @@ describe = function(t)
 
     if t.kind == "record" then return "record" end
 
+    if t.kind == "class" then return t.name end
     return t.kind
 end
 
@@ -76,17 +86,22 @@ end
 --    Nullable is normalized away: T? becomes union{T, nil} — the one
 --    canonical representation decided for nullability.
 -- ===========================================================================
+local class_registry = {}
 
 local function from_ast(node)
     if not node then return T_ANY end
     if node.type == "Type" then
         local name = node.type_name
         local base
-        if name == "number" or name == "string" or name == "boolean" or name == "nil" or name == "any" then
+        if name == "number" or name == "string" or name == "boolean" or name == "nil" or name == "any" or name == "unknown" then
             base = prim(name)
-        else
+        else 
+            local ct = class_registry[name]
             -- unknown names are loud until classes land (§4)
-            error("unknown type '" .. name .. "'")
+            if not ct then
+                error("unknown type '" .. name .. "'")
+            end
+            base = ct
         end
         if node.nullable then
             return union({ base, T_NIL })
@@ -135,7 +150,12 @@ compatible = function(src, dst)
         end
         return false
     end
-
+    if src.kind == "primitive" and src.name == "unknown" then
+        return dst.name == "unknown" or dst.name == "any"   -- out only to itself or any
+    end
+    if dst.kind == "primitive" and dst.name == "unknown" then
+        return true                                          -- everything flows in
+    end
     if src.kind == "primitive" and dst.kind == "primitive" then
         return src.name == dst.name
     end
@@ -146,6 +166,14 @@ compatible = function(src, dst)
         return compatible(src.key, dst.key) and compatible(src.value, dst.value)
     end
     if src.kind == "record" or dst.kind == "record" then return src == dst end
+    if src.kind == "class" and dst.kind == "class" then
+        local c = src
+        while c do
+            if c.name == dst.name then return true end
+            c = c.base_class
+        end
+        return false
+    end
     return false
 end
 
@@ -164,6 +192,36 @@ local function current_ret(scope)
         s = s.parent
     end
     return nil, nil
+end -- Deprecated, but still stay for compatibility
+
+local function current_rets(scope)
+    local s = scope
+    while s do
+        if s.fn_ret ~= nil then return s.fn_ret end     -- fn_ret now holds the list
+        s = s.parent
+    end
+    return nil
+end 
+
+local function current_class(scope)
+    local s = scope
+    while s do
+        if s.current_class_type then return s.current_class_type end
+        s = s.parent
+    end
+    return nil
+end
+
+local function find_member(ct, table_name, member_name)
+    local c = ct
+    while c do
+        if c.class_type ~= "interface" then
+            local m = c[table_name][member_name]
+            if m then return m end
+        end
+        c = c.base_class
+    end
+    return nil
 end
 
 local function declare(scope, name, t)
@@ -189,12 +247,12 @@ local function type_error(msg, node)
 end
 
 local function check_fn_body(node, fn_type, parent_scope)
-    if not node.body then
-        -- method signature (interface / abstract class): no body to walk,
-        -- and signatures are exempt from all-paths-return by nature
-        return
+    fn_type.rets = {}
+    for _, rt in ipairs(node.return_types or {}) do
+        fn_type.rets[#fn_type.rets + 1] = from_ast(rt)
     end
-    local fn_scope = new_scope(parent_scope, false, fn_type.ret)
+    fn_type.ret = fn_type.rets[1] or T_ANY    -- head: existing consumers keep working
+    local fn_scope = new_scope(parent_scope, false, fn_type.rets)
     for _, p in ipairs(node.parameters) do
         if p.type == "Param" then
             local pt = p.param_type and from_ast(p.param_type) or T_ANY
@@ -205,17 +263,19 @@ local function check_fn_body(node, fn_type, parent_scope)
             fn_scope.in_varargs = true
         end
     end
+    if not node.body or fn_type.signature_only then
+        return    -- signature: params collected above, nothing further to check
+    end
     for _, s in ipairs(node.body.statements) do
         check_stmt(s, fn_scope)
     end
-    if node.return_type and not contains_nil(fn_type.ret)
-       and not (fn_type.ret.kind == "primitive" and fn_type.ret.name == "any") then
+    if fn_type.rets[1] and not contains_nil(fn_type.rets[1])
+        and not (fn_type.rets[1].kind == "primitive" and fn_type.rets[1].name == "any") then
         if not definitely_returns(node.body.statements) then
             type_error("declared return type requires all paths to return a value", node)
         end
     end
 end
-
 
 local function in_loop(scope)
     local s = scope
@@ -328,6 +388,19 @@ infer_expr = function(node, scope)
             end
             return T_ANY   -- record["expr"]: conservative, can't know the key
         end
+        if t.kind == "class" then
+            local c, field = t, nil
+            while c do
+                field = c.fields[node.index.name]
+                if field then break end
+                c = c.base_class
+            end
+            if not field then
+                type_error("no such field '" .. node.index.name .. "' in class '"
+                    .. t.name .. "'", node)
+            end
+            return field                                  -- §4.5 trust: inherited too
+        end
         if t.kind == "table" then
             if contains_nil(t.value) then return t.value end
             return union({ t.value, T_NIL })
@@ -341,6 +414,22 @@ infer_expr = function(node, scope)
             if ft.kind == "primitive" and ft.name == "any" then
                 for _, a in ipairs(node.arguments) do infer_expr(a, scope) end
                 return T_ANY                     -- untyped callee: check args, trust result
+            end
+            if ft.kind == "class" then
+                if ft.singleton or ft.abstract or ft.class_type == "interface" then
+                    type_error(ft.name .. " cannot be instantiated", node)   -- per-kind rules
+                end
+                -- data: params required (parser enforced ≥1, checker enforces presence here)
+                if #node.arguments ~= #ft.ctor_params then
+                    type_error("expected " .. #ft.ctor_params .. " constructor arguments", node)
+                end
+                for i, cp in ipairs(ft.ctor_params) do
+                    local at = infer_expr(node.arguments[i], scope)
+                    if not at or not compatible(at, cp.ptype) then
+                        type_error("constructor argument '" .. cp.name .. "' type mismatch", node)
+                    end
+                end
+                return ft                                  -- the instance IS the class type
             end
             type_error("calling a non-function value (" .. describe(ft) .. ")", node)
         end
@@ -395,6 +484,31 @@ infer_expr = function(node, scope)
         if mt.kind == "table" then
             mt = mt.value                        -- method = the value stored under the key
         end
+        if obj_t.kind == "class" then
+            local c, m = obj_t, nil
+            while c do                                  -- walk the extends chain
+                m = c.methods[node.method_name.name]
+                if m then break end
+                c = c.base_class
+            end
+            if not m then
+                type_error("no such method '" .. node.method_name.name
+                    .. "' in class '" .. obj_t.name .. "'", node)
+            end
+            if m.kind == "function" then
+                if not m.varargs and #node.arguments + 1 > #m.params then
+                    type_error("too many arguments", node)
+                end
+                for i, a in ipairs(node.arguments) do
+                    local ptype = m.params[i + 1]       -- +1: self occupies param 1
+                    if ptype and not compatible(infer_expr(a, scope), ptype) then
+                        type_error("argument " .. i .. " type mismatch", node)
+                    end
+                end
+                return m.ret or T_ANY
+            end
+            return T_ANY
+        end
         if mt.kind ~= "function" then
             if mt.kind == "primitive" and mt.name == "any" then
                 for _, a in ipairs(node.arguments) do infer_expr(a, scope) end
@@ -412,13 +526,17 @@ infer_expr = function(node, scope)
                 type_error("argument " .. i .. " type mismatch", node)
             end
         end
-        return mt.ret or T_ANY
+        local fn_type = { kind = "function", params = {}, rets = {},
+                          ret = node.return_types and from_ast(node.return_types[1]) or T_ANY,
+                          varargs = false }
+        for _, rt in ipairs(node.return_types or {}) do
+            fn_type.rets[#fn_type.rets + 1] = from_ast(rt)
+        end
+        fn_type.ret = fn_type.rets[1] or T_ANY
     end
 
     if kind == "FunctionDeclaration" then
-        local fn_type = { kind = "function", params = {},
-                          ret = node.return_type and from_ast(node.return_type) or T_ANY,
-                          varargs = false }
+        local fn_type = { kind = "function", params = {}, rets = {}, varargs = false }
         check_fn_body(node, fn_type, scope)
         return fn_type                                          -- the type IS the result
     end
@@ -427,7 +545,47 @@ infer_expr = function(node, scope)
         local fn_type = {kind = "class"}
     end
 
+    if kind == "SuperCall" then
+        local ct = current_class(scope)
+        if not ct then type_error("'super' used outside of a class", node) end
+        local base = ct.base_class
+        if not base then
+            type_error("class '" .. ct.name .. "' has no superclass", node)
+        end
+        local m = nil
+        local c = base
+        while c do                                       -- nearest ancestor wins
+            m = c.methods[node.method_name.name]
+            if m then break end
+            c = c.base_class
+        end
+        if not m then
+            type_error("no method '" .. node.method_name.name .. "' to call via super", node)
+        end
+        -- self is EXPLICIT in super calls: args map params[1..], no +1 skip
+        if not m.varargs and #node.arguments ~= #m.params then
+            type_error("super." .. node.method_name.name .. " expects " ..
+                #m.params .. " arguments, got " .. #node.arguments, node)
+        end
+        for i, a in ipairs(node.arguments) do
+            if m.params[i] and not compatible(infer_expr(a, scope), m.params[i]) then
+                type_error("argument " .. i .. " type mismatch", node)
+            end
+        end
+        return m.ret or T_ANY
+    end
     type_error("checker: cannot infer expression type '" .. kind .. "'", node)
+end
+
+local function call_rets(node, scope)
+    infer_expr(node, scope)                       -- full call check: arity + args
+    if node.type == "FunctionCall" then
+        local ft = infer_expr(node.func, scope)   -- callee's function type → rets
+        if ft.kind == "function" and ft.rets and #ft.rets > 0 then
+            return ft.rets
+        end
+    end
+    return nil
 end
 
 -- check_stmt(node, scope) — statements produce nothing; they constrain
@@ -436,6 +594,17 @@ check_stmt = function(node, scope)
 
     if kind == "LocalDeclaration" then
         local declared = node.declaration_type and from_ast(node.declaration_type) or nil
+        local spread = #node.values == 1 and call_rets(node.values[1], scope)
+        if spread then
+            for i, name_node in ipairs(node.names) do
+                local t = spread[i]
+                if declared and t and not compatible(t, declared) then
+                    type_error("cannot initialize '" .. name_node.name .. "'", node)
+                end
+                declare(scope, name_node.name, t or T_NIL)   -- missing rets = nil, honestly typed
+            end
+            return
+        end
         -- aligned check: name[i] vs values[i] (extra values ignored, Lua semantics)
         for i, name_node in ipairs(node.names) do
             local value_node = node.values[i]
@@ -460,6 +629,28 @@ check_stmt = function(node, scope)
     end
 
     if kind == "Assignment" then
+        if #node.values == 1 then
+            local spread = call_rets(node.values[1], scope)
+            if spread then
+                for i, target in ipairs(node.variables) do
+                    local t = spread[i]
+                    if not t then
+                        type_error("missing value for assignment target " .. i, node)
+                    elseif target.type == "Identifier" then
+                        local declared = lookup(scope, target.name)
+                        if declared and not compatible(t, declared) then
+                            type_error("cannot assign: types do not match", node)
+                        end
+                    elseif target.type == "TableIndex" then
+                        local tt = infer_expr(target.table, scope)
+                        if tt and tt.kind == "table" and not compatible(t, tt.value) then
+                            type_error("cannot store this value in the table", node)
+                        end
+                    end
+                end
+                return
+            end
+        end
         for i, target in ipairs(node.variables) do
             local t = lookup(scope, target.name or "")
             if target.type == "TableIndex" then
@@ -469,7 +660,18 @@ check_stmt = function(node, scope)
                 if tt.kind == "union" then
                     type_error("cannot index a possibly nil value", node)
                 end
-                if tt and tt.kind == "table" and vt then
+                if tt.kind == "class" then
+                    -- §4 rule 3 write-half: only declared fields, only compatible values
+                    local field = tt.fields[target.index.name]
+                    if not field then
+                        type_error("no such field '" .. target.index.name
+                            .. "' in class '" .. tt.name .. "'", node)
+                    end
+                    if vt and not compatible(vt, field) then
+                        type_error("cannot assign: field type mismatch in class '"
+                            .. tt.name .. "'", node)
+                    end
+                elseif tt and tt.kind == "table" and vt then
                     if not compatible(vt, tt.value) then
                         type_error("cannot store this value in the table", node)
                     end
@@ -566,16 +768,35 @@ check_stmt = function(node, scope)
     end
 
     if kind == "ReturnStatement" then
-        local ret, ctx = current_ret(scope)
-        local inferred = T_NIL                       -- no values = returning nil
-        if #node.values == 1 then
-            inferred = infer_expr(node.values[1], scope)
-        elseif #node.values > 1 then
-            for _, v in ipairs(node.values) do infer_expr(v, scope) end
-            inferred = T_ANY                          -- TODO: tuple types
+        local rets = current_rets(scope)
+        if rets and #node.values == 1 then
+            local spread = call_rets(node.values[1], scope)
+            if spread then
+                for i = 1, #rets do
+                    local t = spread[i]
+                    if not t then
+                        if not contains_nil(rets[i]) then
+                            type_error("missing return value " .. i, node)
+                        end
+                    elseif not compatible(t, rets[i]) then
+                        type_error("return " .. i .. " type mismatch", node)
+                    end
+                end
+                return                      -- propagation handled; positional path skipped
+            end
         end
-        if ret and ret ~= false and not compatible(inferred, ret) then
-            type_error("return type mismatch", node)
+        if rets then
+            for i = 1, #rets do
+                local v = node.values[i]
+                if v then
+                    if not compatible(infer_expr(v, scope), rets[i]) then
+                        type_error("return " .. i .. " type mismatch", node)
+                    end
+                elseif not contains_nil(rets[i]) then
+                    type_error("missing return value " .. i, node)
+                end
+            end
+            -- extra returned values beyond the declared list: legal Lua, unconstrained
         end
         return
     end
@@ -590,9 +811,7 @@ check_stmt = function(node, scope)
 
     if kind == "FunctionDeclaration" then
         -- named function: build type, declare, then check body via the shared helper
-        local fn_type = { kind = "function", params = {},
-                          ret = node.return_type and from_ast(node.return_type) or T_ANY,
-                          varargs = false }
+        local fn_type = { kind = "function", params = {}, varargs = false }
         if node.name then
             if node.name.type ~= "Identifier" then
                 type_error("dotted function declarations are not supported yet — assign an anonymous function instead", node)
@@ -603,8 +822,31 @@ check_stmt = function(node, scope)
         return
     end
 
-    if kind == "FunctionCall" or kind == "MethodCall" then
+    if kind == "FunctionCall" or kind == "MethodCall" or kind == "SuperCall" then
         infer_expr(node, scope)  -- expression statement: still infer for side-effect errors
+        return
+    end
+
+    if kind == "ClassDeclaration" then
+        local ct = class_registry[node.name.name]
+        declare(scope, node.name.name, ct)
+        local class_scope = new_scope(scope)
+        class_scope.class_type = ct              -- §4.5 field trust reads this via self
+        class_scope.current_class_type = ct      -- super resolution reads this
+        local seen = {}
+        for _, m in ipairs(node.body.statements) do
+            local fn_type = { kind = "function", params = {}, rets = {}, varargs = false }
+            -- params loop (Param → build+declare, VarArgs → reject in classes)
+            -- rule 2: first param must be named self, typed compatibly with ct
+            ct.methods[m.name.name] = fn_type      -- shared reference: filled by check_fn_body
+            fn_type.overrides = m.overrides        -- rule 7 needs the flag on the type
+            fn_type.line = m.line                  -- and the line, for rule 7's errors
+            if kind == "interface" or (abstract and #m.body.statements == 0) then
+                fn_type.signature_only = true
+            end
+            check_fn_body(m, fn_type, class_scope)
+            seen[m.name.name] = true
+        end
         return
     end
 
@@ -628,8 +870,130 @@ function Checker.check(ast_nodes, meta)
             parse_warn("incomplete: " .. (m.reason or "no reason given") .. " (line " .. m.line .. ")")
         end
     end
+     -- Step 5: class registry — collect, build, wire
+    local class_types = {}
+    for _, stmt in ipairs(ast_nodes) do
+        if stmt.type == "ClassDeclaration" then
+            local primitives = { number = true, string = true, boolean = true,
+                                 ["nil"] = true, any = true, unknown = true }
+            if primitives[stmt.name.name] then
+                type_error("cannot use primitive type name '" .. stmt.name.name .. "' as a class name", stmt)
+            end
+            if stdlib[stmt.name.name] then
+                type_error("class name '" .. stmt.name.name .. "' conflicts with the standard library", stmt)
+            end
+            if class_types[stmt.name.name] then                     -- ← T1c: ADD
+                type_error("duplicate class '" .. stmt.name.name .. "'", stmt)
+            end
+            local fields = {}
+            for _, p in ipairs(stmt.params) do
+                fields[p.name.name] = p.param_type and from_ast(p.param_type) or T_ANY
+            end
+            local ct = class(stmt.name.name, stmt.class_type,
+                stmt.abstract, fields, {}, nil)   -- base_class wired in pass 2
+            ct.line = stmt.line
+            local ctor_params = {}                          -- ← ADD: ordered, for constructor calls
+            for _, p in ipairs(stmt.params) do              -- ← ADD
+                ctor_params[#ctor_params + 1] = {           -- ← ADD
+                    name = p.name.name,                     -- ← ADD
+                    ptype = p.param_type and from_ast(p.param_type) or T_ANY,  -- ← ADD
+                }                                           -- ← ADD
+            end                                             -- ← ADD
+            ct.ctor_params = ctor_params                    -- ← ADD
+            class_types[stmt.name.name] = ct
+        end
+    end
+    for _, stmt in ipairs(ast_nodes) do           -- pass 2: wire inheritance pointers
+        if stmt.type == "ClassDeclaration" and stmt.extends_name then
+            local base = class_types[stmt.extends_name.name]
+            if not base then
+                type_error("unknown superclass '" .. stmt.extends_name.name .. "'", stmt)
+            end
+            class_types[stmt.name.name].base_class = base
+        end
+    end
+    for name, ct in pairs(class_types) do
+        local seen = { [ct] = true }
+        local c = ct.base_class
+        while c do
+            if seen[c] then
+                type_error("cyclic inheritance involving '" .. name .. "'", ct)
+            end
+            seen[c] = true
+            c = c.base_class
+        end
+    end
+    class_registry = class_types
     for _, stmt in ipairs(ast_nodes) do
         check_stmt(stmt, global_scope)
+    end
+    for _, ct in pairs(class_types) do
+        for mname, m in pairs(ct.methods) do
+            local found, ancestor_m = false, nil
+            local c = ct.base_class
+            while c do
+                if c.class_type ~= "interface" and c.methods[mname] then   -- interfaces don't demand override
+                    found, ancestor_m = true, c.methods[mname]
+                    break
+                end
+                c = c.base_class
+            end
+            if m.overrides and not found then
+                type_error("method '" .. mname .. "' overrides nothing", m)
+            end
+            if found and not m.overrides then
+                type_error("method '" .. mname .. "' must be declared with 'override'", m)
+            end
+            if found and m.overrides then
+                if #m.params ~= #ancestor_m.params then
+                    type_error("override of '" .. mname .. "' has a different parameter count", m)
+                end
+                if m.ret and ancestor_m.ret and not compatible(m.ret, ancestor_m.ret) then
+                    type_error("override of '" .. mname .. "' has an incompatible return type", m)
+                end
+                -- rule 2: self may narrow (Admin <: Player), never widen   ← INSERT
+                local s_self, a_self = m.params[1], ancestor_m.params[1]
+                if s_self and a_self
+                   and not compatible(s_self, a_self) then
+                    type_error("override of '" .. mname .. "' has an incompatible self type", m)
+                end
+            end
+        end
+    end
+    for _, ct in pairs(class_types) do
+        if ct.base_class then
+            local satisfied = {}
+            local c = ct.base_class
+            while c do
+                if c.class_type == "interface" and not satisfied[c.name] then
+                    satisfied[c.name] = true
+                    for fname, ftype in pairs(c.fields) do
+                        local provided = find_member(ct, "fields", fname)
+                        if not provided then
+                            type_error("class '" .. ct.name .. "' does not implement field '"
+                                .. fname .. "' from interface '" .. c.name .. "'", ct)
+                        elseif not compatible(ftype, provided) then
+                            type_error("field '" .. fname .. "' has an incompatible type for interface '"
+                                .. c.name .. "'", ct)
+                        end
+                    end
+                    for mname, m in pairs(c.methods) do
+                        local impl = find_member(ct, "methods", mname)
+                        if not impl then
+                            type_error("class '" .. ct.name .. "' does not implement method '"
+                                .. mname .. "' from interface '" .. c.name .. "'", ct)
+                        elseif #impl.params ~= #m.params then
+                            type_error("method '" .. mname .. "' has a different parameter count than interface '"
+                                .. c.name .. "'", ct)
+                        elseif impl.ret and m.ret and not compatible(impl.ret, m.ret) then
+                            type_error("method '" .. mname .. "' has an incompatible return type for interface '"
+                                .. c.name .. "'", ct)
+                        end
+                    end
+                end
+                c = c.base_class
+            end
+        end
     end
 end
 

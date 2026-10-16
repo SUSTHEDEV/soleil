@@ -78,6 +78,17 @@ local valid = {
   "local x : unknown = 5",
   "local x : unknown = \"s\"",
   "local x : unknown = 5\nlocal a : any = x",
+  -- abstract classes: signatures, bodies, mixed
+  "abstract class Animal\n    abstract function speak(self : Animal) : string\nend",
+  "abstract class Animal\n    function breathe(self : Animal) print(1) end\nend",
+  "abstract class Animal\n    abstract function speak(self : Animal) : string\n    function breathe(self : Animal) print(1) end\nend",
+  "abstract class Animal\n    abstract function speak(self : Animal) : string\nend\nclass Dog extends Animal(\"woof\")\n    override function speak(self : Dog) : string return \"woof\" end\nend",
+  "abstract class A\n    abstract function f(self : A) : string\nend\nclass Plain function g(self : Plain) end end\nlocal ok : string = \"clean\"",
+  -- rule 2: self covariance (narrow ok, same-type ok)
+  "class Player(name : string?) function say(self : Player) end end\nclass A extends Player(\"\") override function say(self : A) end end",
+  "class Player(name : string?) function say(self : Player) end end\nclass A extends Player(\"\") override function say(self : Player) end end",
+  -- no flag leakage: classes after an abstract class parse/check independently
+  "abstract class A\n    abstract function f(self : A) : string\nend\nclass Plain function g(self : Plain) end end\nlocal ok : string = \"still parses and checks\"",
   "local x : unknown = 5\nlocal s : string = tostring(x)",
   -- classes: declare, instantiate, methods, fields
   "class Player(name : string?, id : number) function say(self : Player, msg : string) print(msg) end end\nlocal p : Player = Player(\"bob\", 42)\np:say(\"hi\")\nlocal n : number = p.id",
@@ -98,6 +109,42 @@ local valid = {
   "function get() : number, string return 1, \"a\" end\nfunction f2() : number, string return get() end",
   "function f() : number, string return 1, \"a\" end\nlocal a, b = f()\nlocal s : string = b",
   "local f = function(x : number) : number return x end\nlocal n : number = f(7)",
+  -- null operators: ?.
+  "class P(x : number) end\nlocal p : P? = nil\nlocal v : number? = p?.x",
+  "class P(x : number) end\nlocal p : P? = P(5)\nlocal v : number? = p?.x",
+  "class P(x : number) function get(self : P) : number return self.x end end\nlocal p : P? = nil\nlocal v : number? = p?.get()",
+  "class C(r : number) function a(self : C) : number return 3 end end\nclass S(s : number) function a(self : S) : number return 4 end end\nlocal t : C | S? = S(1)\nlocal v : number? = t?.a()",
+  "local s : string? = \"hi\"\nlocal v : number? = s?.len()",
+  -- null operators: ?:
+  "local p : number? = nil\nlocal n : number = p ?: 0",
+  "local p : number? = 9\nlocal n : number = p ?: 0",
+  "local b : boolean? = false\nlocal v : boolean = b ?: true",
+  "local xs : table[number] = {}\nlocal n : number = xs[1] ?: 42",
+  "local a : number? = nil\nlocal b : number? = 5\nlocal n : number = a ?: b ?: 7",
+  -- null operators: !!
+  "local p : number? = 1\nlocal n : number = p!!",
+  "local xs : table[number] = {7}\nlocal n : number = xs[1]!! + 1",
+  -- compositions
+  "class P(x : number) end\nlocal p : P? = P(6)\nlocal n : number = (p?.x ?: 0) + 1",
+  "class P(x : number) end\nlocal p : P? = P(7)\nlocal n : number = p?.x!! + 1",
+  -- field typing
+  "class P(x : number?)\n    function get(self : P) : number? return self.x end\nend\nlocal v : number? = P(9):get()",
+  "class P(v : number | string)\n    function isnum(self : P) : boolean return type(self.v) == \"number\" end\nend\nlocal b : boolean = P(1):isnum()",
+  "class Engine(power : number)\n    function rev(self : Engine) : number return self.power end\nend\nclass Car(engine : Engine)\n    function drive(self : Car) : number return self.engine:rev() end\nend\nlocal n : number = Car(Engine(40)):drive()",
+  "class Bag(items : table[number])\n    function first(self : Bag) : number? return self.items[1] end\nend\nlocal v : number? = Bag({3, 1, 2}):first()",
+  -- polymorphic containers (union dispatch + nil-guard narrowing)
+  "class Circle(r : number)\n    function area(self : Circle) : number return 3 end\nend\n"
+    .. "class Square(s : number)\n    function area(self : Square) : number return 4 end\nend\n"
+    .. "local shapes : table[Circle | Square] = { Circle(1), Square(1) }\n"
+    .. "local t = 0\nfor i = 1, 2 do\n    local s = shapes[i]\n    if s ~= nil then t = t + s:area() end\nend",
+  -- inheritance: super-args, fn-local factories, sibling same-name classes, do-blocks
+  "class A(x : number)\n    function get(self : A) : number return self.x end\nend\n"
+    .. "class B(y : number) extends A(y)\n    function both(self : B) : number return self.x + self.y end\nend\n"
+    .. "local n : number = B(3):both()",
+  "local function make()\n    class C(x : number)\n        function get(self : C) : number return self.x end\n    end\n    return C(5)\nend\nlocal n : number = make():get()",
+  "local function f()\n    class Q(x : number) function g(self : Q) : number return self.x end end\n    return Q(1):g() end\n"
+    .. "local function h()\n    class Q(x : number) function g(self : Q) : number return self.x end end\n    return Q(2):g() end",
+  "do local z = 7 print(z) end",
 }
 
 -- fix the any-echo case: needs `a` declared first
@@ -158,6 +205,12 @@ local invalid = {
   { "interface Shape(name : string)\n    function area(self : Shape) : number\nend\nclass Circle(x : number) extends Shape\nend", "does not implement" },
   { "interface Shape(name : string)\n    function area(self : Shape) : number\nend\nclass Circle(x : number, name : string) extends Shape\n    function area(self : Circle) : string return \"s\" end\nend", "incompatible return type" },
   { "interface Shape function area(self : Shape) : number return 1 end end", "cannot have bodies" },
+  -- abstract classes
+  { "abstract class A\n    abstract function f(self : A) print(1) end\nend", "abstract methods cannot have bodies" },
+  { "class C abstract function f(self : C) end end",              "abstract members are only allowed in abstract classes" },
+  { "interface I abstract function f(self : I) end end",          "abstract members are only allowed in abstract classes" },
+  -- rule 2: self widening denied
+  { "class Player(name : string?) function say(self : Player) end end\nclass A extends Player(\"\") override function say(self : A) end end\nclass Z extends A override function say(self : Player) end end", "incompatible self type" },
   -- call-ret propagation
   { "function get() : number, number return 1, 2 end\nfunction f2() : number, string return get() end", "return 2 type mismatch" },
   { "function get() : number return 1 end\nfunction f2() : number, string return get() end", "missing return value 2" },
@@ -168,6 +221,25 @@ local invalid = {
   { "function g() : number return 1 end\nlocal s : string = g()", "cannot initialize" },
   { "function h() : number, string return 1, \"a\" end\nlocal s : string = h()", "cannot initialize" },
   { "function h() : number, string return 1 end",                 "missing return value 2" },
+  -- null operators
+  { "local x : number = 1\nprint(x!!)",                          "assertion on a non-nullable" },
+  { "local x : number = 1\nprint(x ?: 0)",                       "elvis on a non-nullable" },
+  { "class P(x : number) end\nlocal p : P? = P(1)\nprint(p?.nope)", "no such field" },
+  { "class P(x : number) function get(self : P) : number return self.x end end\nlocal p : P? = P(1)\nprint(p?.get(9))", "too many arguments" },
+  { "class Circle(r : number) function area(self : Circle) : number return 3 end end\n"
+    .. "class Square(s : number) function area(self : Square) : number return 4 end end\n"
+    .. "local shapes : table[Circle | Square] = { Circle(1), Square(1) }\nprint(shapes[1]:area())", "possibly-nil receiver" },
+  { "class Circle(r : number) function area(self : Circle) : number return 3 end end\n"
+    .. "class Square(s : number) function area(self : Square) : number return 4 end end\n"
+    .. "local shapes : table[Circle | Square] = { Circle(1), Square(1) }\n"
+    .. "local s = shapes[1]\nif s ~= nil then print(s:area(1)) end", "too many arguments" },
+  -- container element strictness
+  { "local xs : table[number] = {1, \"x\"}",                     "cannot initialize" },
+  { "class Bag(items : table[number]) end\nlocal b = Bag({9, \"x\"})", "type mismatch" },
+  -- class-name discipline
+  { "local function f()\n    class Q(x : number) end\n    class Q(y : number) end\n    return Q(1)\nend", "duplicate class name" },
+  { "local function f()\n    class Q(x : number) end\n    return Q\nend", "as a value" },
+  { "class A(x : number) end\nclass B extends A\n    function f(self : B) : number return super.nope(self) end\nend", "no method" },
 }
 
 -- ---------------------------------------------------------------------------

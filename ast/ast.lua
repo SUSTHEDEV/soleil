@@ -251,4 +251,27 @@ function AST.ClassDeclaration(name, params, body, abstract, singleton, class_typ
     }
 end
 
+function AST.SafeAccess(object, access)      -- p?.x / p?.m(args) / p?.[k]
+    return {
+        type = "SafeAccess",
+        object = object,                     -- the (possibly-nil) receiver
+        access = access                      -- downstream TableIndex/MethodCall whose
+    }                                        --   receiver field IS `object`
+end
+
+function AST.Elvis(left, right)              -- a ?: b
+    return {
+        type = "Elvis",
+        left = left,
+        right = right
+    }
+end
+
+function AST.NotNullAssertion(operand)       -- p!!
+    return {
+        type = "NotNullAssertion",
+        operand = operand
+    }
+end
+
 return AST

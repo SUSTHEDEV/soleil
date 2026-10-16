@@ -99,6 +99,16 @@ local valid = {
   "local x = 1e10",
   "local x = 1.5e-3",
   "local x = 2E+2",
+  -- null operators (lexer tokens + postfix/ladder wiring)
+  "local p : P? = nil\nprint(p?.x)",
+  "local p : P? = nil\nprint(p?.m(1))",
+  "local p : P? = P(1)\nprint(p!!.x)",
+  "local p : number? = nil\nprint(p ?: 0)",
+  "local a : number? = nil\nlocal b : number? = nil\nprint(a ?: b ?: 7)",
+  "local p : number? = 1\nif p ~= nil and p ?: 0 > 1 then print(1) end",
+  -- table[V] single-arg array form
+  "local xs : table[number] = {1, 2, 3}",
+  "local cs : table[C | D] = {}",
 }
 
 -- ---------------------------------------------------------------------------
@@ -147,6 +157,11 @@ local malformed = {
   "for i = 1, 10, 2, junk do end",
   "local x = 1,,2",
   "x = ,",
+  -- null operators: malformed forms
+  "local p = 1\nprint(p?)",
+  "print(?.)",
+  "local p : number? = nil\nprint(p ?:)",
+  "local xs : table[number] = {}\nprint(xs[1]!!?)",
 }
 
 -- ---------------------------------------------------------------------------

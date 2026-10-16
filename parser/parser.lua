@@ -1,3 +1,5 @@
+-- DESIGN: concat '..' is STRICT — both operands must be strings (no Lua-style
+-- number coercion). Checkpoint: tostring(n). Confirmed by the OOP battery.
 local lpeg = require("lpeg") -- unused for now, but will be used later for more advanced parsing (better to keep this here for now)
 local ast = require("ast.ast")
 local config = require("config.config")
@@ -47,6 +49,7 @@ local soleil_keywords = {
 }
 local current_class_name = nil
 local allow_signature = false   -- true while parsing an interface body
+local fn_depth = 0               -- function-in-function nesting, capped at 100
 
 local ESCAPES = {
     ["n"] = "\n", ["t"] = "\t", ["r"] = "\r", ["a"] = "\a",
@@ -312,7 +315,7 @@ function parse(tokens, markers)
     local function is_comparison(op)
         return comparison_ops[op] or false
     end    
-    function parse_primary()
+    function parse_primary(scope)
         if i > #tokens then
             parse_error("unexpected end of input")
         end
@@ -326,6 +329,11 @@ function parse(tokens, markers)
             i = i + 1
             return ast.String(token.value)
         elseif i <= #tokens and tokens[i].type == "KEYWORD" and tokens[i].value == "function" then
+            local saved_fn_depth = fn_depth
+            fn_depth = fn_depth + 1
+            if fn_depth > 100 then
+                parse_error("function nesting too deep (limit 100)")
+            end
             local fn_line = tokens[i].line
             i = i + 1  -- skip 'function'
             -- function name: Name {'.' Name} [':' Name] — absent = anonymous
@@ -350,7 +358,7 @@ function parse(tokens, markers)
             if not (i <= #tokens and tokens[i].type == "SYMBOL" and tokens[i].value == "(") then
                 parse_error("expected '(' after function name")
             end
-            args, has_varargs = parse_params()
+            local args, has_varargs = parse_params()
             if is_method then
                 table.insert(args, 1, ast.Param(ast.Identifier("self"), nil))  -- function a:b() gets implicit self
             end
@@ -367,16 +375,21 @@ function parse(tokens, markers)
                 i = i + 1
                 return_types = parse_type()
             end
-            if allow_signature and tokens[i] and tokens[i].type == "KEYWORD"
-               and tokens[i].value == "end" then
-                -- interface signature: no body — FunctionDeclaration with nil body
+            local member_start = tokens[i] and tokens[i].type == "KEYWORD"
+                and (tokens[i].value == "end" or tokens[i].value == "function"
+                    or tokens[i].value == "override" or tokens[i].value == "abstract")
+            if (allow_signature or force_signature)
+               and (i > #tokens or member_start) then
+                -- signature: no body — FunctionDeclaration with nil body
+                fn_depth = saved_fn_depth          -- ← before this return
                 return at(ast.FunctionDeclaration(func_name, args, nil, return_types, false), fn_line)
             end
-            local body = parse_block{ ["end"] = true }
+            local body = parse_block({ ["end"] = true }, scope)
             if not tokens[i] or tokens[i].type ~= "KEYWORD" or tokens[i].value ~= "end" then
                 parse_error("expected 'end' after function body")
             end
             i = i + 1  -- skip 'end'
+            fn_depth = saved_fn_depth          -- ← before this return
             return at(ast.FunctionDeclaration(func_name, args, body, return_types), fn_line)
         elseif i <= #tokens and token.type == "IDENTIFIER" then
             -- calls, method calls, and indexing are postfix now (parse_postfix)
@@ -405,12 +418,12 @@ function parse(tokens, markers)
             if not (tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "(") then
                 parse_error("expected '(' after 'super." .. mname.name .. "'")
             end
-            return at(ast.SuperCall(mname, parse_args()), token.line)
+            return at(ast.SuperCall(mname, parse_args(scope)), token.line)
         elseif token.type == "SYMBOL" and token.value == "{" then
             return parse_table()
         elseif i <= #tokens and token.type == "SYMBOL" and token.value == "(" then
             i = i + 1
-            local expr = parse_expression()
+            local expr = parse_expression(scope)
             if i <= #tokens and tokens[i].type == "SYMBOL" and tokens[i].value == ")" then
                 i = i + 1
             end
@@ -422,32 +435,32 @@ function parse(tokens, markers)
         return nil
     end
 
-    function parse_for_loop()
+    function parse_for_loop(scope)
         local token = tokens[i]
         i = i + 1  -- skip 'for'
         local var = read_loop_var()
         if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "=" then
             -- numeric for: for NAME = start, finish [, step] do ... end
             i = i + 1
-            local start = parse_expression()
+            local start = parse_expression(scope)
             if not start then parse_error("expected start expression in numeric for") end
             if not (tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == ",") then
                 parse_error("expected ',' in numeric for")
             end
             i = i + 1
-            local finish = parse_expression()
+            local finish = parse_expression(scope)
             if not finish then parse_error("expected limit expression in numeric for") end
             local step
             if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "," then
                 i = i + 1
-                step = parse_expression()
+                step = parse_expression(scope)
                 if not step then parse_error("expected step expression in numeric for") end
             end
             if not (tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "do") then
                 parse_error("expected 'do' in numeric for")
             end
             i = i + 1  -- skip 'do'
-            local body = parse_block{ ["end"] = true }
+            local body = parse_block({ ["end"] = true }, scope)
             if not tokens[i] or tokens[i].type ~= "KEYWORD" or tokens[i].value ~= "end" then
                 parse_error("expected 'end' after for loop body")
             end
@@ -466,12 +479,12 @@ function parse(tokens, markers)
             i = i + 1
         end
         local iters = {}
-        local it = parse_expression()
+        local it = parse_expression(scope)
         if not it then parse_error("expected expression after 'in'") end
         table.insert(iters, it)
         while tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "," do
             i = i + 1
-            local next_it = parse_expression()
+            local next_it = parse_expression(scope)
             if not next_it then parse_error("expected expression after ',' in generic for") end
             table.insert(iters, next_it)
         end
@@ -479,7 +492,7 @@ function parse(tokens, markers)
             parse_error("expected 'do' in generic for")
         end
         i = i + 1  -- skip 'do'
-        local body = parse_block{ ["end"] = true }
+        local body = parse_block({ ["end"] = true }, scope)
         if not tokens[i] or tokens[i].type ~= "KEYWORD" or tokens[i].value ~= "end" then
             parse_error("expected 'end' after for loop body")
         end
@@ -489,13 +502,13 @@ function parse(tokens, markers)
         return at(ast.ForInLoop(vars, iters, body), token.line)
     end
 
-    function parse_repeat_loop()
+    function parse_repeat_loop(scope)
         local token = tokens[i]
         i = i + 1  -- skip 'repeat'
-        local body = parse_block{ ["until"] = true }
+        local body = parse_block({ ["until"] = true }, scope)
         if i <= #tokens and tokens[i].type == "KEYWORD" and tokens[i].value == "until" then
             i = i + 1
-            local condition = parse_expression()
+            local condition = parse_expression(scope)
             if not condition then
                 parse_error("expected condition")
             end
@@ -504,10 +517,10 @@ function parse(tokens, markers)
         parse_error("expected 'until' after repeat block")
     end
 
-    function parse_while_loop()
+    function parse_while_loop(scope)
         local token = tokens[i]
         i = i + 1  -- skip 'while'
-        local condition = parse_expression()
+        local condition = parse_expression(scope)
         if not condition then
             parse_error("expected condition")
         end
@@ -515,7 +528,7 @@ function parse(tokens, markers)
             i = i + 1
         end
         i = i + 1  -- skip 'do'
-        local body = parse_block{ ["end"] = true }
+        local body = parse_block({ ["end"] = true }, scope)
         if not tokens[i] or tokens[i].type ~= "KEYWORD" or tokens[i].value ~= "end" then
             parse_error("expected 'end' after while loop body")
         end
@@ -535,11 +548,11 @@ function parse(tokens, markers)
         parse_error("expected loop variable name, got ...")  -- when error reporting lands
     end
 
-    function parse_block(terminators)
+    function parse_block(terminators, scope)
         local token = tokens[i]
         local stmts = {}
         while i <= #tokens and not (tokens[i].type == "KEYWORD" and terminators[tokens[i].value]) do
-            local stmt = parse_statement()
+            local stmt = parse_statement(scope)
             if stmt then
                 table.insert(stmts, stmt)
             else
@@ -549,18 +562,18 @@ function parse(tokens, markers)
         return at(ast.Block(stmts), token.line)
     end
 
-    function parse_expression()        -- `or` (loosest)
-        local left = parse_and()
+    function parse_expression(scope)        -- `or` (loosest)
+        local left = parse_and(scope)
         while tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "or" do
             local op = tokens[i].value; i = i + 1
-            left = ast.BinaryOp(left, op, parse_and())
+            left = ast.BinaryOp(left, op, parse_and(scope))
         end
         return left
     end
 
-    function parse_assignment()
+    function parse_assignment(scope)
         local token = tokens[i]
-        local left = parse_expression()
+        local left = parse_expression(scope)
         if not left then parse_error("expected expression") end
         local targets = nil
         -- more targets: a, b = ...  (comma loop must wrap AROUND the '=' check,
@@ -568,7 +581,7 @@ function parse(tokens, markers)
         while tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "," do
             if not targets then targets = { left } end
             i = i + 1
-            left = parse_expression()
+            left = parse_expression(scope)
             if not left then parse_error("expected assignment target after ','") end
             targets[#targets + 1] = left
         end
@@ -577,7 +590,7 @@ function parse(tokens, markers)
             i = i + 1
             local values = {}
             while true do
-                local v = parse_expression()
+                local v = parse_expression(scope)
                 if not v then parse_error("expected expression after '='") end
                 values[#values + 1] = v
                 if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "," then
@@ -594,80 +607,80 @@ function parse(tokens, markers)
         return left
     end
 
-    function parse_and()               -- `and`
-        local left = parse_comparison()
+    function parse_and(scope)               -- `and`
+        local left = parse_elvis(scope)
         while tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "and" do
             local op = tokens[i].value; i = i + 1
-            left = ast.BinaryOp(left, op, parse_comparison())
+            left = ast.BinaryOp(left, op, parse_elvis(scope))
         end
         return left
     end
 
-    function parse_comparison()        -- == ~= < > <= >=
-        local left = parse_concat()
+    function parse_comparison(scope)        -- == ~= < > <= >=
+        local left = parse_concat(scope)
         while tokens[i] and tokens[i].type == "SYMBOL" and is_comparison(tokens[i].value) do
             local op = tokens[i].value; i = i + 1
-            left = ast.BinaryOp(left, op, parse_concat())
+            left = ast.BinaryOp(left, op, parse_concat(scope))
         end
         return left
     end
 
-    function parse_concat()            -- `..` (right-assoc in Lua)
-        local left = parse_addsub()
+    function parse_concat(scope)            -- `..` (right-assoc in Lua)
+        local left = parse_addsub(scope)
         if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == ".." then
             i = i + 1
-            left = ast.BinaryOp(left, "..", parse_concat())
+            left = ast.BinaryOp(left, "..", parse_concat(scope))
         end
         return left
     end
 
-    function parse_addsub()            -- `+ -`
-        local left = parse_muldiv()
+    function parse_addsub(scope)            -- `+ -`
+        local left = parse_muldiv(scope)
         while tokens[i] and tokens[i].type == "SYMBOL" and (tokens[i].value == "+" or tokens[i].value == "-") do
             local op = tokens[i].value; i = i + 1
-            left = ast.BinaryOp(left, op, parse_muldiv())
+            left = ast.BinaryOp(left, op, parse_muldiv(scope))
         end
         return left
     end
 
-    function parse_muldiv()            -- `* / %`
-        local left = parse_unary()
+    function parse_muldiv(scope)            -- `* / %`
+        local left = parse_unary(scope)
         while tokens[i] and tokens[i].type == "SYMBOL" and (tokens[i].value == "*" or tokens[i].value == "/" or tokens[i].value == "%") do
             local op = tokens[i].value; i = i + 1
-            left = ast.BinaryOp(left, op, parse_unary())
+            left = ast.BinaryOp(left, op, parse_unary(scope))
         end
         return left
     end
 
-    function parse_unary()             -- `- not #`
+    function parse_unary(scope)             -- `- not #`
         if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "-" then
             local op = tokens[i].value; i = i + 1
-            return ast.UnaryOp(op, parse_unary())
+            return ast.UnaryOp(op, parse_unary(scope))
         elseif tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "not" then
             local op = tokens[i].value; i = i + 1
-            return ast.UnaryOp(op, parse_unary())
+            return ast.UnaryOp(op, parse_unary(scope))
         elseif tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "#" then
             local op = tokens[i].value; i = i + 1
-            return ast.UnaryOp(op, parse_unary())
+            return ast.UnaryOp(op, parse_unary(scope))
         end
-        return parse_power()
+        return parse_power(scope)
     end
 
-    function parse_power()             -- `^` (tightest, RIGHT-assoc)
-        local left = parse_postfix()
+    function parse_power(scope)             -- `^` (tightest, RIGHT-assoc)
+        local left = parse_postfix(scope)
         if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "^" then
             i = i + 1
-            left = ast.BinaryOp(left, "^", parse_power())
+            left = ast.BinaryOp(left, "^", parse_power(scope))
         end
         return left
     end
 
     -- parses '(' args ')' — call arguments, with strict ')' handling
-    function parse_args()
+    function parse_args(scope)
         i = i + 1  -- skip '('
         local args = {}
         while i <= #tokens and not (tokens[i].type == "SYMBOL" and tokens[i].value == ")") do
-            local arg = parse_expression()
+            local arg = parse_expression(scope)
             if arg then
                 table.insert(args, arg)
             end
@@ -688,8 +701,8 @@ function parse(tokens, markers)
         return args
     end
 
-    function parse_postfix()
-        local expr = parse_primary()
+    function parse_postfix(scope)
+        local expr = parse_primary(scope)
         while i <= #tokens do
             local t = tokens[i]
             if t.type == "SYMBOL" and t.value == "." then
@@ -703,14 +716,14 @@ function parse(tokens, markers)
                 i = i + 1
             elseif t.type == "SYMBOL" and t.value == "[" then
                 i = i + 1                       -- skip '['
-                local index = parse_expression()
+                local index = parse_expression(scope)
                 if not (i <= #tokens and tokens[i].type == "SYMBOL" and tokens[i].value == "]") then
                     parse_error("expected ']' after table index")
                 end
                 i = i + 1                       -- skip ']'
                 expr = ast.TableIndex(expr, index)
             elseif t.type == "SYMBOL" and t.value == "(" then
-                expr = ast.FunctionCall(expr, parse_args())
+                expr = ast.FunctionCall(expr, parse_args(scope))
             elseif t.type == "SYMBOL" and t.value == ":" then
                 i = i + 1
                 if not (i <= #tokens and tokens[i].type == "IDENTIFIER") then
@@ -721,7 +734,7 @@ function parse(tokens, markers)
                 -- method call args: a:b(...) | a:b{...} | a:b"..."
                 local nxt = tokens[i]
                 if nxt and nxt.type == "SYMBOL" and nxt.value == "(" then
-                    expr = ast.MethodCall(expr, ast.Identifier(method_name), parse_args())
+                    expr = ast.MethodCall(expr, ast.Identifier(method_name), parse_args(scope))
                 elseif nxt and nxt.type == "SYMBOL" and nxt.value == "{" then
                     expr = ast.MethodCall(expr, ast.Identifier(method_name), { parse_table() })
                 elseif nxt and nxt.type == "STRING" then
@@ -733,6 +746,30 @@ function parse(tokens, markers)
             elseif t.type == "SYMBOL" and t.value == "{" then
                 -- call sugar: f{ ... }  ≡  f({ ... })
                 expr = ast.FunctionCall(expr, { parse_table() })
+           elseif t.type == "SYMBOL" and t.value == "?." then
+                -- safe access: normal access node with receiver = expr, wrapped
+                i = i + 1
+                if not (i <= #tokens and tokens[i].type == "IDENTIFIER") then
+                    parse_error("expected field or method name after '?.'")
+                end
+                local name = tokens[i].value
+                i = i + 1
+                local nxt = tokens[i]
+                if nxt and nxt.type == "SYMBOL" and nxt.value == "(" then
+                    expr = ast.SafeAccess(expr, ast.MethodCall(expr, ast.Identifier(name), parse_args(scope)))
+                elseif nxt and nxt.type == "SYMBOL" and nxt.value == "{" then
+                    expr = ast.SafeAccess(expr, ast.MethodCall(expr, ast.Identifier(name), { parse_table() }))
+                elseif nxt and nxt.type == "STRING" then
+                    expr = ast.SafeAccess(expr, ast.MethodCall(expr, ast.Identifier(name), { ast.String(nxt.value) }))
+                    i = i + 1
+                else
+                    local ti = ast.TableIndex(expr, ast.Identifier(name))
+                    ti.via_dot = true
+                    expr = ast.SafeAccess(expr, ti)
+                end
+            elseif t.type == "SYMBOL" and t.value == "!!" then
+                i = i + 1
+                expr = ast.NotNullAssertion(expr)
             elseif t.type == "STRING" then
                 -- call sugar: f"str"  ≡  f("str")
                 expr = ast.FunctionCall(expr, { ast.String(t.value) })
@@ -744,7 +781,7 @@ function parse(tokens, markers)
         return expr
     end
 
-    function parse_statement()
+    function parse_statement(scope)
         local token = tokens[i]
         if not token then return nil end
         
@@ -753,7 +790,7 @@ function parse(tokens, markers)
             if tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "function" then
                 -- local function Name(...) ... end
                 -- desugars to: LocalDeclaration(Name, <anonymous function>)
-                local fn = parse_primary()
+                local fn = parse_primary(scope)
                 if not fn or fn.type ~= "FunctionDeclaration" or not fn.name then
                     parse_error("expected function name after 'local function'")
                 end
@@ -784,7 +821,7 @@ function parse(tokens, markers)
             if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "=" then
                 i = i + 1
                 while true do
-                    local v = parse_expression()
+                    local v = parse_expression(scope)
                     if not v then parse_error("expected expression") end
                     values[#values + 1] = v
                     if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "," then
@@ -796,12 +833,12 @@ function parse(tokens, markers)
 
         elseif token.type == "KEYWORD" and token.value == "do" then
             i = i + 1  -- skip 'do'
-            local body = parse_block{ ["end"] = true }
+            local body = parse_block({ ["end"] = true }, scope)
             if not tokens[i] or tokens[i].type ~= "KEYWORD" or tokens[i].value ~= "end" then
                 parse_error("expected 'end' after do block")
             end
             i = i + 1
-            return at(ast.Block(body), token.line)
+            return at(body, token.line)   -- parse_block already returns a Block — no double wrap
 
         elseif token.type == "SYMBOL" and token.value == "(" then
             -- parenthesized expression statement: (function() end)() etc.
@@ -811,31 +848,34 @@ function parse(tokens, markers)
             parse_error("unexpected '{' — a table constructor is an expression, not a statement")
 
         elseif token.type == "KEYWORD" and token.value == "if" then
-            return parse_if_statement()
+            return parse_if_statement(scope)
 
         elseif token.type == "KEYWORD" and token.value == "while" then
-            return parse_while_loop()
+            return parse_while_loop(scope)
 
         elseif token.type == "KEYWORD" and token.value == "for" then
-            return parse_for_loop()
+            return parse_for_loop(scope)
 
         elseif token.type == "KEYWORD" and token.value == "break" then
             i = i + 1  -- skip 'break'
             return at(ast.BreakStatement(), token.line)
         elseif token.type == "KEYWORD" and token.value == "repeat" then
-            return parse_repeat_loop()
+            return parse_repeat_loop(scope)
         elseif token.type == "IDENTIFIER" then
             return parse_assignment()  -- Handle assignments and function calls
         elseif token.type == "KEYWORD" and token.value == "function" then
-            return parse_expression()  -- function expression as a statement
-        elseif token.type == "KEYWORD" and (token.value == "class" or token.value == "interface" or token.value == "data" or token.value == "object") then
-            return parse_class(token.value)
+            return parse_expression(scope)  -- function expression as a statement
+        elseif token.type == "KEYWORD" and (token.value == "class"
+               or token.value == "interface" or token.value == "data") then
+            return parse_class(token.value, scope)
         elseif token.type == "KEYWORD" and token.value == "abstract" then
             i = i + 1
             if not (tokens[i] and tokens[i].value == "class") then
                 parse_error("expected 'class' after 'abstract'")
             end
-            return parse_class("class", true)
+            return parse_class("class", true, scope)
+        elseif token.type == "KEYWORD" and token.value == "object" then
+            parse_error("objects can only be declared at the top level")
         elseif token.type == "KEYWORD" and token.value == "super" then
             return parse_assignment()   -- super.m(self) as an expression statement
         elseif i <= #tokens and token.type == "KEYWORD" and token.value == "return" then
@@ -846,12 +886,12 @@ function parse(tokens, markers)
             if tokens[i] and not (tokens[i].type == "KEYWORD"
                   and (tokens[i].value == "end" or tokens[i].value == "else" or tokens[i].value == "elseif"))
                   and not (tokens[i].type == "SYMBOL" and tokens[i].value == ";") then
-                local ret_val = parse_expression()
+                local ret_val = parse_expression(scope)
                 if not ret_val then parse_error("expected expression in return statement") end
                 table.insert(return_values, ret_val)
                 while tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "," do
                     i = i + 1
-                    ret_val = parse_expression()
+                    ret_val = parse_expression(scope)
                     if not ret_val then parse_error("expected expression after ',' in return statement") end
                     table.insert(return_values, ret_val)
                 end
@@ -861,12 +901,12 @@ function parse(tokens, markers)
     end
 
     -- Helper function to parse if/elseif statements recursively
-    function parse_if_statement()
+    function parse_if_statement(scope)
         local token = tokens[i]
         i = i + 1  -- skip 'if' or 'elseif'
         
         -- Parse condition
-        local condition = parse_expression()
+        local condition = parse_expression(scope)
         if not condition then
             parse_error("expected condition")
         end
@@ -877,7 +917,7 @@ function parse(tokens, markers)
         end
         i = i + 1  -- skip 'then'
         
-       local thenBlock = parse_block{ ["end"] = true, ["else"] = true, ["elseif"] = true }
+       local thenBlock = parse_block({ ["end"] = true, ["else"] = true, ["elseif"] = true }, scope)
         
         local elseBlock = nil
         
@@ -888,11 +928,11 @@ function parse(tokens, markers)
         local consumed_end = false
 
         if i <= #tokens and tokens[i].type == "KEYWORD" and tokens[i].value == "elseif" then
-            elseBlock = parse_if_statement()   -- recursive call consumes the shared 'end'
+            elseBlock = parse_if_statement(scope)   -- recursive call consumes the shared 'end'
             consumed_end = true
         elseif i <= #tokens and tokens[i].type == "KEYWORD" and tokens[i].value == "else" then
             i = i + 1  -- skip 'else'
-            elseBlock = parse_block{ ["end"] = true }
+            elseBlock = parse_block({ ["end"] = true }, scope)
         end
 
         if not consumed_end then
@@ -934,7 +974,7 @@ function parse(tokens, markers)
                 if first.type == "Type" and first.type_name == "any" then
                     form, key, value = "any", first, first      -- table[any]
                 else
-                    form, key, value = "array", first, first    -- table[V]
+                    form, key, value = "array", ast.Type("number", false), first   -- table[V]: arrays are number-keyed
                 end
             end
             base = ast.TableType(form, key, value)
@@ -982,7 +1022,7 @@ function parse(tokens, markers)
                 if nxt and nxt.type == "SYMBOL" and nxt.value == "=" then
                     local name = ast.Identifier(tokens[i].value)
                     i = i + 2
-                    local value = parse_expression()
+                    local value = parse_expression(scope)
                     if not value then parse_error("expected value after '='") end
                     table.insert(fields, ast.TableField(name, value))
                 elseif nxt and nxt.type == "SYMBOL"
@@ -991,7 +1031,7 @@ function parse(tokens, markers)
                     i = i + 1
                     table.insert(fields, ast.TableField(ast.Identifier(field_name), ast.Identifier(field_name)))
                 else
-                    local value = parse_expression()
+                    local value = parse_expression(scope)
                     if not value then parse_error("expected field name, value, or '}'") end
                     table.insert(fields, ast.TableField(nil, value))
                 end
@@ -999,7 +1039,7 @@ function parse(tokens, markers)
             elseif tokens[i].type == "SYMBOL" and tokens[i].value == "[" then
                 -- computed key: { [expr] = value }
                 i = i + 1                                -- skip '['
-                local key = parse_expression()
+                local key = parse_expression(scope)
                 if not (tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "]") then
                     parse_error("expected ']' after table key")
                 end
@@ -1008,7 +1048,7 @@ function parse(tokens, markers)
                     parse_error("expected '=' after table key")
                 end
                 i = i + 1
-                local value = parse_expression()
+                local value = parse_expression(scope)
                 if not value then parse_error("expected value after '='") end
                 local field = ast.TableField(key, value)
                 field.computed = true    -- {[k] = v}: key is an expression, not the name
@@ -1016,7 +1056,7 @@ function parse(tokens, markers)
 
             else
                 -- positional entry: {1, 2} / {"x"} / {f()} — no key
-                local value = parse_expression()
+                local value = parse_expression(scope)
                 if not value then
                     parse_error("expected field name, value, or '}'")
                 end
@@ -1070,7 +1110,7 @@ function parse(tokens, markers)
         return params, varargs
     end
 
-    function parse_class(kind, abstract)
+    function parse_class(kind, abstract, scope)
         if kind ~= "class" and kind ~= "interface" and kind ~= "data" and kind ~= "object" then
             parse_error("expected 'class', 'interface', or 'data'")
         end
@@ -1114,7 +1154,7 @@ function parse(tokens, markers)
             extends_name = ast.Identifier(tokens[i].value)
             i = i + 1
             if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "(" then
-                extends_args = parse_args()
+                extends_args = parse_args(scope)
             end
         end
 
@@ -1123,38 +1163,62 @@ function parse(tokens, markers)
         local seen = {}
         local saved_class = current_class_name
         local saved_signature = allow_signature
+        local saved_force = force_signature
         current_class_name = class_name.name
         allow_signature = (kind == "interface") or abstract
         while i <= #tokens and not (tokens[i].type == "KEYWORD" and tokens[i].value == "end") do
-            if kind == "data" then
-                parse_error("data classes cannot have methods (in class '" .. class_name.name .. "')")
-            end
             local is_override = false
             if tokens[i].type == "KEYWORD" and tokens[i].value == "override" then
                 i = i + 1
                 is_override = true
             end
-            if not (tokens[i].type == "KEYWORD" and tokens[i].value == "function") then
-                parse_error("expected function member or 'end' in " .. kind .. " body")
+            local is_abstract_member = false
+            if tokens[i].type == "KEYWORD" and tokens[i].value == "abstract" then
+                i = i + 1
+                is_abstract_member = true
+                if kind ~= "class" or not abstract then
+                    parse_error("abstract members are only allowed in abstract classes")
+                end
             end
-            local fn = parse_primary()
-            if not fn.name then
-                parse_error("class methods must be named")
+            local is_nested_class = false
+            if tokens[i].type == "KEYWORD"
+               and (tokens[i].value == "class" or tokens[i].value == "interface"
+                    or tokens[i].value == "data") then
+                local nested = parse_class(tokens[i].value, scope)          -- recursion
+                nested.nested_in = class_name.name                   -- qualification info
+                table.insert(members, nested)
+                is_nested_class = true
             end
-            fn.overrides = is_override
-            if seen[fn.name.name] then
-                parse_error("duplicate method '" .. fn.name.name .. "' in class '"
-                    .. class_name.name .. "'")
+            if not is_nested_class then
+                if not (tokens[i].type == "KEYWORD" and tokens[i].value == "function") then
+                    parse_error("expected function member or 'end' in " .. kind .. " body")
+                end
+                force_signature = is_abstract_member    -- BEFORE the parse
+                local fn = parse_primary(scope)
+                if not fn.name then
+                    parse_error("class methods must be named")
+                end
+                fn.overrides = is_override
+                fn.abstract = is_abstract_member
+                if seen[fn.name.name] then
+                    parse_error("duplicate method '" .. fn.name.name .. "' in class '"
+                        .. class_name.name .. "'")
+                end
+                seen[fn.name.name] = true
+                if kind == "interface" and fn.body and #fn.body.statements > 0 then
+                    parse_error("interface methods cannot have bodies (in interface '"
+                        .. class_name.name .. "')")
+                end
+                if force_signature and fn.body then
+                    parse_error("abstract methods cannot have bodies (in class '"
+                        .. class_name.name .. "')")
+                end
+                table.insert(members, fn)
             end
-            seen[fn.name.name] = true
-            if kind == "interface" and fn.body and #fn.body.statements > 0 then
-                parse_error("interface methods cannot have bodies (in interface '"
-                    .. class_name.name .. "')")
-            end
-            table.insert(members, fn)
         end
         current_class_name = saved_class
         allow_signature = saved_signature
+        force_signature = saved_force
         if not (tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "end") then
             parse_error("expected 'end' after " .. kind .. " body")
         end
@@ -1167,6 +1231,18 @@ function parse(tokens, markers)
                     abstract,is_singleton, kind, extends_name, extends_args), class_line)
     end
 
+    function parse_elvis(scope)
+        local left = parse_comparison(scope)
+        if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "?:" then
+            local line = tokens[i].line
+            i = i + 1
+            local right = parse_elvis(scope)      -- right-assoc: a ?: b ?: c
+            if not right then parse_error("expected expression after '?:'") end
+            return at(ast.Elvis(left, right), line)
+        end
+        return left
+    end
+
     while i <= #tokens do
         local token = tokens[i]
         
@@ -1176,7 +1252,7 @@ function parse(tokens, markers)
             if tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "function" then
                 -- local function Name(...) ... end
                 -- desugars to: LocalDeclaration(Name, <anonymous function>)
-                local fn = parse_primary()
+                local fn = parse_primary(scope)
                 if not fn or fn.type ~= "FunctionDeclaration" or not fn.name then
                     parse_error("expected function name after 'local function'")
                 end
@@ -1207,7 +1283,7 @@ function parse(tokens, markers)
             if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "=" then
                 i = i + 1
                 while true do
-                    local v = parse_expression()
+                    local v = parse_expression(scope)
                     if not v then parse_error("expected expression") end
                     values[#values + 1] = v
                     if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "," then
@@ -1218,24 +1294,24 @@ function parse(tokens, markers)
             table.insert(ast_nodes, at(ast.LocalDeclaration(names, values, declaration_type), token.line))
             end
         elseif token.type == "KEYWORD" and token.value == "if" then
-            table.insert(ast_nodes, parse_if_statement())
+            table.insert(ast_nodes, parse_if_statement(scope))
 
         elseif token.type == "KEYWORD" and token.value == "while" then
-            table.insert(ast_nodes, parse_while_loop())
+            table.insert(ast_nodes, parse_while_loop(scope))
 
         elseif token.type == "KEYWORD" and token.value == "for" then
-            table.insert(ast_nodes, parse_for_loop())
+            table.insert(ast_nodes, parse_for_loop(scope))
 
         elseif token.type == "KEYWORD" and token.value == "break" then
             i = i + 1  -- skip 'break'
             table.insert(ast_nodes, at(ast.BreakStatement(), token.line))
         elseif token.type == "KEYWORD" and token.value == "repeat" then
-            table.insert(ast_nodes, parse_repeat_loop())
+            table.insert(ast_nodes, parse_repeat_loop(scope))
         elseif token.type == "IDENTIFIER" then
             local stmt = parse_assignment()
             table.insert(ast_nodes, stmt)
         elseif token.type == "KEYWORD" and token.value == "function" then
-            table.insert(ast_nodes, parse_expression())  -- function expression as a statement
+            table.insert(ast_nodes, parse_expression(scope))  -- function expression as a statement
         elseif i <= #tokens and token.type == "KEYWORD" and token.value == "return" then
             i = i + 1  -- skip 'return'
             -- return [explist] — stops at block terminators (return ends a block)
@@ -1243,12 +1319,12 @@ function parse(tokens, markers)
             if tokens[i] and not (tokens[i].type == "KEYWORD"
                   and (tokens[i].value == "end" or tokens[i].value == "else" or tokens[i].value == "elseif"))
                   and not (tokens[i].type == "SYMBOL" and tokens[i].value == ";") then
-                local ret_val = parse_expression()
+                local ret_val = parse_expression(scope)
                 if not ret_val then parse_error("expected expression in return statement") end
                 table.insert(return_values, ret_val)
                 while tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "," do
                     i = i + 1
-                    ret_val = parse_expression()
+                    ret_val = parse_expression(scope)
                     if not ret_val then parse_error("expected expression after ',' in return statement") end
                     table.insert(return_values, ret_val)
                 end
@@ -1256,24 +1332,24 @@ function parse(tokens, markers)
             table.insert(ast_nodes, at(ast.ReturnStatement(return_values), token.line))
         elseif token.type == "KEYWORD" and token.value == "do" then
             i = i + 1  -- skip 'do'
-            local body = parse_block{ ["end"] = true }
+            local body = parse_block({ ["end"] = true }, scope)
             if not tokens[i] or tokens[i].type ~= "KEYWORD" or tokens[i].value ~= "end" then
                 parse_error("expected 'end' after do block")
             end
             i = i + 1
-            table.insert(ast_nodes, at(ast.Block(body), token.line))
+            table.insert(ast_nodes, at(body, token.line))   -- parse_block already returns a Block
         elseif token.type == "SYMBOL" and token.value == "(" then
             -- parenthesized expression statement: (function() end)() etc.
             table.insert(ast_nodes, parse_assignment())
         elseif token.type == "KEYWORD" and (token.value == "class"
                or token.value == "interface" or token.value == "data" or token.value == "object") then
-            table.insert(ast_nodes, parse_class(token.value))
+            table.insert(ast_nodes, parse_class(token.value, scope))
         elseif token.type == "KEYWORD" and token.value == "abstract" then
             i = i + 1
             if not (tokens[i] and tokens[i].value == "class") then
                 parse_error("expected 'class' after 'abstract'")
             end
-            table.insert(ast_nodes, parse_class("class", true))
+            table.insert(ast_nodes, parse_class("class", true, scope))
         elseif token.type == "SYMBOL" and token.value == "{" then
         parse_error("unexpected '{' — a table constructor is an expression, not a statement")
         else

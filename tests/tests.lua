@@ -87,7 +87,6 @@ local valid = {
   "local x = f(1, 2)",
   "if a then return else b = 1 end",
   "local x = {p = {q = 1}}",
-  "local x = {a = 1}.a",
   -- numerals (every Lua 5.1 form)
   "local x = 42",
   "local x = 1.5",
@@ -109,6 +108,9 @@ local valid = {
   -- table[V] single-arg array form
   "local xs : table[number] = {1, 2, 3}",
   "local cs : table[C | D] = {}",
+  -- real Lua: constructors cannot be indexed/called directly (prefixexp rule)
+  "local x = ({a = 1}).a",
+  "local f = ({1, 2})[1]",
 }
 
 -- ---------------------------------------------------------------------------
@@ -157,6 +159,9 @@ local malformed = {
   "for i = 1, 10, 2, junk do end",
   "local x = 1,,2",
   "x = ,",
+  -- real Lua: constructor literals take no suffixes (prefixexp rule)
+  "local x = {a = 1}.a",
+  "local y = {1, 2}[1]",
   -- null operators: malformed forms
   "local p = 1\nprint(p?)",
   "print(?.)",

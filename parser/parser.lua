@@ -91,8 +91,11 @@ function laxed_error(message)
     print("Parse Error, but you chose to relax, so here's what's wrong to fix and make it work in standard strict Soleil: " .. message)
 end
 
+local current_parse_line = 0        -- kept fresh by parse/tokenize for error messages
+
 function parse_error(message)
-    error("Parse Error: " .. message)
+    local at = current_parse_line > 0 and (" at line " .. current_parse_line) or ""
+    error("Parse Error" .. at .. ": " .. message)
 end
 
 -- stamps a source line onto a node; returns the node (chainable)
@@ -128,6 +131,7 @@ local function tokenize(input, dialect)
     end
 
     while cursor <= #input do
+        current_parse_line = line
         local char = input:sub(cursor, cursor)
         
         -- Skip spaces
@@ -267,6 +271,13 @@ local function tokenize(input, dialect)
                 local level = #long_open - 2                              -- count of '='
                 local close_pat = "]" .. string.rep("=", level) .. "]"
                 local content_start = cursor + #long_open
+                -- Lua: a newline IMMEDIATELY after the opening bracket is
+                -- not part of the string (keeps embedded line numbers sane)
+                if input:sub(content_start, content_start + 1) == "\r\n" then
+                    content_start = content_start + 2
+                elseif input:sub(content_start, content_start):match("[\n\r]") then
+                    content_start = content_start + 1
+                end
                 local close = input:find(close_pat, content_start, true)
                 if not close then
                     parse_error("unterminated long string")
@@ -308,6 +319,7 @@ local function tokenize(input, dialect)
 end
 
 function parse(tokens, markers)
+    if tokens and tokens[1] then current_parse_line = tokens[1].line or 0 end
     local ast_nodes = {}  -- collect ALL nodes
     local i = 1  -- cursor position
     local parse_expression, parse_statement, parse_if_statement  -- forward declarations
@@ -426,8 +438,11 @@ function parse(tokens, markers)
             local expr = parse_expression(scope)
             if i <= #tokens and tokens[i].type == "SYMBOL" and tokens[i].value == ")" then
                 i = i + 1
+            else
+                parse_error("expected ')' after parenthesized expression")
             end
-            return expr
+            -- parens are SEMANTIC in Lua: (f()) truncates multi-returns to one
+            return at(ast.Paren(expr), token.line)
         elseif token.type == "SYMBOL" and token.value == "..." then
             i = i + 1
             return ast.VarArgs()
@@ -556,7 +571,7 @@ function parse(tokens, markers)
             if stmt then
                 table.insert(stmts, stmt)
             else
-                i = i + 1   -- progress guard (unrecognized token)
+                -- nil = consumed an empty statement (';'); it advanced i itself
             end
         end
         return at(ast.Block(stmts), token.line)
@@ -670,7 +685,9 @@ function parse(tokens, markers)
         local left = parse_postfix(scope)
         if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "^" then
             i = i + 1
-            left = ast.BinaryOp(left, "^", parse_power(scope))
+            -- the exponent may carry a unary operator: 2^-2 == 2^(-2);
+            -- right-assoc survives because unary recurses back into power
+            left = ast.BinaryOp(left, "^", parse_unary(scope))
         end
         return left
     end
@@ -703,7 +720,16 @@ function parse(tokens, markers)
 
     function parse_postfix(scope)
         local expr = parse_primary(scope)
+        if not expr then return nil end      -- primary already reported nothing; caller's nil-check fires
         while i <= #tokens do
+        if tokens[i] and tokens[i].line then current_parse_line = tokens[i].line end
+            -- real Lua: non-prefixexp primaries take NO suffixes. A '(' after
+            -- one begins a NEW statement (a = nil\n(function() end)(23) is
+            -- two statements), and nil.x / 5[1] are syntax errors.
+            if expr.type == "Nil" or expr.type == "Boolean" or expr.type == "Number"
+               or expr.type == "String" or expr.type == "TableConstruction" then
+                break
+            end
             local t = tokens[i]
             if t.type == "SYMBOL" and t.value == "." then
                 i = i + 1
@@ -781,7 +807,7 @@ function parse(tokens, markers)
         return expr
     end
 
-    function parse_statement(scope)
+    function parse_statement(scope, top_level)
         local token = tokens[i]
         if not token then return nil end
         
@@ -875,6 +901,9 @@ function parse(tokens, markers)
             end
             return parse_class("class", true, scope)
         elseif token.type == "KEYWORD" and token.value == "object" then
+            if top_level then
+                return parse_class("object", scope)
+            end
             parse_error("objects can only be declared at the top level")
         elseif token.type == "KEYWORD" and token.value == "super" then
             return parse_assignment()   -- super.m(self) as an expression statement
@@ -897,6 +926,13 @@ function parse(tokens, markers)
                 end
             end
             return at(ast.ReturnStatement(return_values), token.line)
+
+        elseif token.type == "SYMBOL" and token.value == ";" then
+            i = i + 1  -- empty statement
+            return nil
+
+        else
+            parse_error("unexpected symbol '" .. tostring(token.value) .. "'")
         end
     end
 
@@ -1013,11 +1049,10 @@ function parse(tokens, markers)
             if tokens[i].type == "SYMBOL" and (tokens[i].value == "," or tokens[i].value == ";") then
                 i = i + 1                                -- skip ',' or ';' (both are field separators)
             elseif tokens[i].type == "IDENTIFIER" then
-                -- three sub-cases, decided by ONE-token lookahead:
-                --   {name = value}  pair
-                --   {name,} / {name}  shorthand (≡ {["name"] = name})
-                --   {name[expr]} / {name.k} / {name(...)}  positional entry whose
-                --     expression merely STARTS with an identifier
+                -- two sub-cases, decided by ONE-token lookahead:
+                --   {name = value}  named pair
+                --   anything else  positional ({a,b} is POSITIONAL in Lua —
+                --     a {name} shorthand would corrupt {a,b,c,d})
                 local nxt = tokens[i + 1]
                 if nxt and nxt.type == "SYMBOL" and nxt.value == "=" then
                     local name = ast.Identifier(tokens[i].value)
@@ -1025,14 +1060,9 @@ function parse(tokens, markers)
                     local value = parse_expression(scope)
                     if not value then parse_error("expected value after '='") end
                     table.insert(fields, ast.TableField(name, value))
-                elseif nxt and nxt.type == "SYMBOL"
-                       and (nxt.value == "," or nxt.value == "}") then
-                    local field_name = tokens[i].value
-                    i = i + 1
-                    table.insert(fields, ast.TableField(ast.Identifier(field_name), ast.Identifier(field_name)))
                 else
                     local value = parse_expression(scope)
-                    if not value then parse_error("expected field name, value, or '}'") end
+                    if not value then parse_error("expected field name, value, or '}") end
                     table.insert(fields, ast.TableField(nil, value))
                 end
 
@@ -1244,123 +1274,11 @@ function parse(tokens, markers)
     end
 
     while i <= #tokens do
-        local token = tokens[i]
-        
-        -- Pattern: local IDENTIFIER = VALUE
-        if token.type == "KEYWORD" and token.value == "local" then
-            i = i + 1  -- skip 'local'
-            if tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "function" then
-                -- local function Name(...) ... end
-                -- desugars to: LocalDeclaration(Name, <anonymous function>)
-                local fn = parse_primary(scope)
-                if not fn or fn.type ~= "FunctionDeclaration" or not fn.name then
-                    parse_error("expected function name after 'local function'")
-                end
-                if fn.name.type ~= "Identifier" then
-                    parse_error("local function name must be a plain identifier")
-                end
-                local name = fn.name
-                fn.name = nil
-                table.insert(ast_nodes, at(ast.LocalDeclaration({ name }, { fn }), token.line))
-            else
-            local names = {}
-            while true do
-                if not (tokens[i] and tokens[i].type == "IDENTIFIER") then
-                    parse_error("expected name in local declaration")
-                end
-                names[#names + 1] = ast.Identifier(tokens[i].value)
-                i = i + 1
-                if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "," then
-                    i = i + 1
-                else break end
-            end
-            local declaration_type
-            if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == ":" then
-                i = i + 1                               -- the declaration consumes ':'
-                declaration_type = parse_type()
-            end
-            local values = {}
-            if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "=" then
-                i = i + 1
-                while true do
-                    local v = parse_expression(scope)
-                    if not v then parse_error("expected expression") end
-                    values[#values + 1] = v
-                    if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "," then
-                        i = i + 1
-                    else break end
-                end
-            end
-            table.insert(ast_nodes, at(ast.LocalDeclaration(names, values, declaration_type), token.line))
-            end
-        elseif token.type == "KEYWORD" and token.value == "if" then
-            table.insert(ast_nodes, parse_if_statement(scope))
-
-        elseif token.type == "KEYWORD" and token.value == "while" then
-            table.insert(ast_nodes, parse_while_loop(scope))
-
-        elseif token.type == "KEYWORD" and token.value == "for" then
-            table.insert(ast_nodes, parse_for_loop(scope))
-
-        elseif token.type == "KEYWORD" and token.value == "break" then
-            i = i + 1  -- skip 'break'
-            table.insert(ast_nodes, at(ast.BreakStatement(), token.line))
-        elseif token.type == "KEYWORD" and token.value == "repeat" then
-            table.insert(ast_nodes, parse_repeat_loop(scope))
-        elseif token.type == "IDENTIFIER" then
-            local stmt = parse_assignment()
-            table.insert(ast_nodes, stmt)
-        elseif token.type == "KEYWORD" and token.value == "function" then
-            table.insert(ast_nodes, parse_expression(scope))  -- function expression as a statement
-        elseif i <= #tokens and token.type == "KEYWORD" and token.value == "return" then
-            i = i + 1  -- skip 'return'
-            -- return [explist] — stops at block terminators (return ends a block)
-            local return_values = {}
-            if tokens[i] and not (tokens[i].type == "KEYWORD"
-                  and (tokens[i].value == "end" or tokens[i].value == "else" or tokens[i].value == "elseif"))
-                  and not (tokens[i].type == "SYMBOL" and tokens[i].value == ";") then
-                local ret_val = parse_expression(scope)
-                if not ret_val then parse_error("expected expression in return statement") end
-                table.insert(return_values, ret_val)
-                while tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "," do
-                    i = i + 1
-                    ret_val = parse_expression(scope)
-                    if not ret_val then parse_error("expected expression after ',' in return statement") end
-                    table.insert(return_values, ret_val)
-                end
-            end
-            table.insert(ast_nodes, at(ast.ReturnStatement(return_values), token.line))
-        elseif token.type == "KEYWORD" and token.value == "do" then
-            i = i + 1  -- skip 'do'
-            local body = parse_block({ ["end"] = true }, scope)
-            if not tokens[i] or tokens[i].type ~= "KEYWORD" or tokens[i].value ~= "end" then
-                parse_error("expected 'end' after do block")
-            end
-            i = i + 1
-            table.insert(ast_nodes, at(body, token.line))   -- parse_block already returns a Block
-        elseif token.type == "SYMBOL" and token.value == "(" then
-            -- parenthesized expression statement: (function() end)() etc.
-            table.insert(ast_nodes, parse_assignment())
-        elseif token.type == "KEYWORD" and (token.value == "class"
-               or token.value == "interface" or token.value == "data" or token.value == "object") then
-            table.insert(ast_nodes, parse_class(token.value, scope))
-        elseif token.type == "KEYWORD" and token.value == "abstract" then
-            i = i + 1
-            if not (tokens[i] and tokens[i].value == "class") then
-                parse_error("expected 'class' after 'abstract'")
-            end
-            table.insert(ast_nodes, parse_class("class", true, scope))
-        elseif token.type == "SYMBOL" and token.value == "{" then
-        parse_error("unexpected '{' — a table constructor is an expression, not a statement")
-        else
-            if token.type == "SYMBOL" and token.value == ";" then
-                i = i + 1  -- empty statement
-            else
-                parse_error("unexpected symbol '" .. tostring(token.value) .. "'")
-            end
-        end
+        current_parse_line = tokens[i].line and tokens[i].line or current_parse_line
+        local stmt = parse_statement(scope, true)   -- ONE dispatcher: top level allows 'object'
+        if stmt then table.insert(ast_nodes, stmt) end
     end
-    
+
     return ast_nodes, { incomplete = markers or {} }  -- nodes + incomplete markers
 end
 

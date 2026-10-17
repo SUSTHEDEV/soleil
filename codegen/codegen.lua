@@ -12,7 +12,8 @@ function Codegen.generate(ast_nodes)
         if type(node) ~= "table" then return end
         if node.type then
             if node.type == "ClassDeclaration" then
-                class_nodes[node.name.name] = node  -- outer first…
+                local key = node.qname or node.name.name
+                class_nodes[key] = node             -- outer first…
                 collect_classes(node.body)          -- …nested overwrite: innermost wins
             end
             for k, v in pairs(node) do
@@ -44,6 +45,24 @@ function Codegen.generate(ast_nodes)
 
     local current_class = nil                             -- innermost class being emitted
     local codegen_stmt, codegen_expr, codegen_block       -- mutually recursive
+    local prefix_str
+    local codegen_stmt_raw                                -- depth-capped body
+    local emit_depth = 0
+
+    -- Lua prefixexp ::= var | functioncall | '(' exp ')' — literals, table
+    -- constructors, and operators are NOT valid call/index receivers. Wrap.
+    prefix_str = function(n)
+        local s = codegen_expr(n)
+        local k = n.type
+        if k == "TableConstruction" or k == "String" or k == "Number"
+           or k == "Boolean" or k == "Nil" or k == "VarArgs"
+           or k == "BinaryOp" or k == "UnaryOp"
+           or (k == "FunctionDeclaration" and not n.name) then
+            return "(" .. s .. ")"
+        end
+        if k == "Paren" then return s end       -- already parenthesized
+        return s
+    end
 
     codegen_block = function(block)                        -- block = { statements = {...} }
         indent = indent + 1
@@ -54,9 +73,28 @@ function Codegen.generate(ast_nodes)
     end
 
     codegen_stmt = function(node)
+        emit_depth = emit_depth + 1
+        if emit_depth > 1500 then
+            emit_depth = emit_depth - 1
+            error("codegen: nesting too deep (limit 1500)")
+        end
+        codegen_stmt_raw(node)
+        emit_depth = emit_depth - 1
+    end
+
+    codegen_stmt_raw = function(node)
         local kind = node.type
 
         if kind == "LocalDeclaration" then
+            -- `local function f` desugars to Local{f, anon-fn}: the local must
+            -- be PRE-DECLARED or the body's recursive call resolves to a global
+            if #node.names == 1 and #node.values == 1
+                  and node.values[1].type == "FunctionDeclaration"
+                  and node.values[1].name == nil then
+                emit("local " .. node.names[1].name)
+                emit(node.names[1].name .. " = " .. codegen_expr(node.values[1]))
+                return
+            end
             local names, vals = {}, {}
             for _, n in ipairs(node.names) do names[#names + 1] = n.name end
             for _, v in ipairs(node.values) do vals[#vals + 1] = codegen_expr(v) end
@@ -73,26 +111,22 @@ function Codegen.generate(ast_nodes)
             emit(table.concat(targets, ", ") .. " = " .. table.concat(vals, ", "))
 
         elseif kind == "IfStatement" then
+            -- elseif chains are NESTED IfStatements in elseBlock: walk them
             emit("if " .. codegen_expr(node.condition) .. " then")
             codegen_block(node.thenBlock)
-            if node.elseBlock then
-                if node.elseBlock.type == "IfStatement" then
-                    emit("elseif " .. codegen_expr(node.elseBlock.condition) .. " then")
-                    -- NOTE: recurse specially — see below
-                    codegen_block(node.elseBlock.thenBlock)
-                    if node.elseBlock.elseBlock then
-                        emit("else")
-                        codegen_block(node.elseBlock.elseBlock)
-                    end
-                    emit("end")
+            local eb = node.elseBlock
+            while eb do
+                if eb.type == "IfStatement" then
+                    emit("elseif " .. codegen_expr(eb.condition) .. " then")
+                    codegen_block(eb.thenBlock)
+                    eb = eb.elseBlock
                 else
                     emit("else")
-                    codegen_block(node.elseBlock)
-                    emit("end")
+                    codegen_block(eb)
+                    eb = nil
                 end
-            else
-                emit("end")
             end
+            emit("end")
 
         elseif kind == "WhileLoop" then
             emit("while " .. codegen_expr(node.condition) .. " do")
@@ -153,7 +187,7 @@ function Codegen.generate(ast_nodes)
 
         elseif kind == "ClassDeclaration" then
             if node.class_type ~= "interface" then
-                local cname = node.name.name
+                local cname = node.qname or node.name.name
                 local saved_class = current_class
                 current_class = node
 
@@ -188,12 +222,12 @@ function Codegen.generate(ast_nodes)
                 end
                 emit("function __" .. cname .. "_new(" .. table.concat(ctor, ", ") .. ")")
                 indent = indent + 1
-                if node.extends_name and class_nodes[node.extends_name.name] then
+                if node.extends_name and class_nodes[node.extends_qname or node.extends_name.name] then
                     local sargs = {}
                     for _, a in ipairs(node.extends_args or {}) do
                         sargs[#sargs + 1] = codegen_expr(a)
                     end
-                    emit("local self = __" .. node.extends_name.name .. "_new("
+                    emit("local self = __" .. (node.extends_qname or node.extends_name.name) .. "_new("
                         .. table.concat(sargs, ", ") .. ")")
                 else
                     emit("local self = {}")
@@ -207,13 +241,14 @@ function Codegen.generate(ast_nodes)
                 local cnode = node
                 while cnode do
                     table.insert(chain, 1, cnode)
-                    cnode = cnode.extends_name and class_nodes[cnode.extends_name.name] or nil
+                    cnode = cnode.extends_name
+                        and class_nodes[cnode.extends_qname or cnode.extends_name.name] or nil
                 end
                 for _, anc in ipairs(chain) do
                     for _, m in ipairs(anc.body.statements) do
                         if m.type == "FunctionDeclaration" then
                             emit("self." .. m.name.name .. " = __"
-                                .. anc.name.name .. "_" .. m.name.name)
+                                .. (anc.qname or anc.name.name) .. "_" .. m.name.name)
                         end
                     end
                 end
@@ -240,11 +275,17 @@ function Codegen.generate(ast_nodes)
     codegen_expr = function(node)
         local kind = node.type
         if kind == "Number" then return tostring(node.value) end
-        if kind == "String" then return string.format("%q", node.value) end
+        if kind == "String" then
+            -- %q escapes newlines as backslash+REAL newline; emit()'s
+            -- re-indent would then inject spaces INTO the literal and shift
+            -- embedded line numbers. Convert to plain \n escapes.
+            return (string.format("%q", node.value):gsub("\\\n", "\\n"))
+        end
         if kind == "Boolean" then return tostring(node.value) end
         if kind == "Nil" then return "nil" end
         if kind == "VarArgs" then return "..." end
         if kind == "Identifier" then return node.name end
+        if kind == "Paren" then return "(" .. codegen_expr(node.expr) .. ")" end
 
         if kind == "BinaryOp" then
             return "(" .. codegen_expr(node.left) .. " " .. node.operator
@@ -256,9 +297,9 @@ function Codegen.generate(ast_nodes)
 
         if kind == "TableIndex" then
             if node.via_dot then
-                return codegen_expr(node.table) .. "." .. node.index.name
+                return prefix_str(node.table) .. "." .. node.index.name
             end
-            return codegen_expr(node.table) .. "[" .. codegen_expr(node.index) .. "]"
+            return prefix_str(node.table) .. "[" .. codegen_expr(node.index) .. "]"
         end
 
         if kind == "FunctionCall" and node.ctor_class then
@@ -270,13 +311,13 @@ function Codegen.generate(ast_nodes)
         if kind == "FunctionCall" then
             local args = {}
             for _, a in ipairs(node.arguments) do args[#args + 1] = codegen_expr(a) end
-            return codegen_expr(node.func) .. "(" .. table.concat(args, ", ") .. ")"
+            return prefix_str(node.func) .. "(" .. table.concat(args, ", ") .. ")"
         end
 
         if kind == "SuperCall" then
             -- super.m(args) → nearest ancestor's flat method, self explicit
             local base = current_class and current_class.extends_name
-                and class_nodes[current_class.extends_name.name] or nil
+                and class_nodes[current_class.extends_qname or current_class.extends_name.name] or nil
             while base do
                 local found = false
                 for _, m in ipairs(base.body.statements) do
@@ -287,7 +328,8 @@ function Codegen.generate(ast_nodes)
                     end
                 end
                 if found then break end
-                base = base.extends_name and class_nodes[base.extends_name.name] or nil
+                base = base.extends_name
+                    and class_nodes[base.extends_qname or base.extends_name.name] or nil
             end
             if not base then
                 error("codegen: no ancestor defines method '"
@@ -308,7 +350,7 @@ function Codegen.generate(ast_nodes)
                     .. (next(node.arguments) and ", " .. table.concat(args, ", ") or "") .. ")"
             end
             -- dynamic fallback: interface-typed receivers — instances carry methods
-            return codegen_expr(node.object) .. ":" .. node.method_name.name
+            return prefix_str(node.object) .. ":" .. node.method_name.name
                 .. "(" .. table.concat(args, ", ") .. ")"
         end
 

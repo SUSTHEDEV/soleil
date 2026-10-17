@@ -267,6 +267,13 @@ function AST.Elvis(left, right)              -- a ?: b
     }
 end
 
+function AST.Paren(expr)                     -- (expr): truncates multi-returns
+    return {
+        type = "Paren",
+        expr = expr
+    }
+end
+
 function AST.NotNullAssertion(operand)       -- p!!
     return {
         type = "NotNullAssertion",

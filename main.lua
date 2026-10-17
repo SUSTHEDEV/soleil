@@ -1,15 +1,22 @@
-local ast = require("ast.ast")
 local codegen = require("codegen.codegen")
 local parser = require("parser.parser")
 local helpers = require("helpers.compile_helpers")
-local Checker = require("checker.checker")
+local checker = require("checker.checker")
 
--- Check if verbose flag is enabled
 local verbose = false
 local help = false
-local compile = false
+local run = false
 local output_path = nil
-local interpret = false
+local input_path = nil
+
+local function usage()
+    print("Usage: lua main.lua <input.sol | input.lua> [options]")
+    print("Options:")
+    print("  -o, --output <file>  Write generated Lua to <file> (default: stdout)")
+    print("  --run                Compile and execute in-process")
+    print("  -v, --verbose        Dump tokens and AST before compiling")
+    print("  -h, --help           Show this help message")
+end
 
 local i = 1
 while i <= #arg do
@@ -17,19 +24,10 @@ while i <= #arg do
     if a == "-v" or a == "--verbose" then
         verbose = true
     elseif a == "-h" or a == "--help" then
-        print("Usage: lua main.lua [options]")
-        print("Options:")
-        print("  -v, --verbose   Enable verbose output (tokens and AST)")
-        print("  -h, --help      Show this help message")
-        print("  -c, --compile   Compile the input")
-        print("  --luajit        Compile to LuaJIT")
-        print("  -o, --output <file>  Write generated Lua to <file>")
-        print("  -i, --interpret Interpret the input")
+        usage()
         help = true
-    elseif a == "-c" or a == "--compile" then
-        compile = true
-    elseif a == "--luajit" then
-        print("LuaJIT option is not implemented yet.")
+    elseif a == "--run" or a == "-i" or a == "--interpret" then
+        run = true
     elseif a == "-o" or a == "--output" then
         i = i + 1
         output_path = arg[i]
@@ -37,91 +35,76 @@ while i <= #arg do
             print("error: -o requires a filename")
             os.exit(1)
         end
-    elseif a == "-i" or a == "--interpret" then
-        interpret = true
-    elseif a == "--bytecode" then
-        print("Bytecode option is not implemented yet.")
     else
-        print("Unknown option: " .. a)
-        print("Use -h or --help for usage information.")
+        input_path = a
     end
     i = i + 1
 end
 
+local function fail(msg)
+    local s = tostring(msg)
+    print(s:match("^.-:%d+: (.+)$") or s)   -- strip 'path:line: ' prefixes only
+    os.exit(1)
+end
+
 function main()
-    if not help then
-        local input = [[
-            local x = 10
-            if x > 5 then
-                print("x is greater than 5")
-            elseif x == 5 then
-                print("x is equal to 5")
-            else
-                print("x is less than or equal to 5")
-            end
-            function c(a, b)
-                if a > b and a and b then
-                    return a - b
-                else
-                    return b - a
-                end
-            end
-            local t = {}
-            local obj = {}
-            obj.b = function(self, x)
-                return x
-            end
-            print(obj:b(7))
-            for i, v in ipairs(t) do
-                print(i, v)
-            end
-            while x > 0 do
-                x = x - 1
-            end
-            for i = 1, 10, 2 do
-                print(i)
-            end
-            repeat
-                x = x + 1
-            until x >= 10
-        ]]
+    if help then return end
 
-        -- Tokenize the input (dialect comes from the extension)
-        local dialect = (input_path or ""):match("%.lua$") and "lua" or "soleil"
-        local tokens = parser.tokenize(input, dialect)
-        
-        if verbose then
-            print("=== TOKENS ===")
-            helpers.print_tokens(tokens)
-            print()
-        end
-        
-        local ast_tree, meta = parser.parse(tokens)
+    -- input: positional file (dialect by extension) or stdin
+    local source
+    if input_path then
+        local fh, err = io.open(input_path, "r")
+        if not fh then fail("cannot open '" .. input_path .. "': " .. tostring(err)) end
+        source = fh:read("*a")
+        fh:close()
+    else
+        source = io.read("*a")
+    end
+    if not source or source == "" then
+        fail("no input: give a file path or pipe source on stdin")
+    end
 
-        -- Print the AST only if verbose flag is set
-        if verbose then
-            print("=== AST ===")
-            helpers.print_ast_tree(ast_tree)
-        end
+    -- dialect from the extension: .lua = plain Lua mode, anything else = soleil
+    local dialect = (input_path or ""):match("%.lua$") and "lua" or "soleil"
 
-        -- Type-check: loud — abort on the first violation
-        local ok, err = pcall(Checker.check, ast_tree, meta)
-        if not ok then
-            print(tostring(err):gsub("^.-: ", ""))
-            os.exit(1)
-        end
+    -- tokenize -> parse -> check -> generate; every tier fails loud
+    local ok, tokens, markers = pcall(parser.tokenize, source, dialect)
+    if not ok then fail(tokens) end
 
-        -- Generate plain Lua 5.1 from the checked AST (types are erased)
-        local lua_source = codegen.generate(ast_tree)
+    if verbose then
+        print("=== TOKENS ===")
+        helpers.print_tokens(tokens)
+        print()
+    end
 
-        if output_path then
-            local fh = io.open(output_path, "w")
-            fh:write(lua_source .. "\n")
-            fh:close()
-            print("wrote " .. output_path)
-        else
-            print(lua_source)
-        end
+    -- pcall returns (ok, ret1, ret2, ...) FLAT: the tree and meta are separate
+    local ok2, ast_tree, meta = pcall(parser.parse, tokens, markers)
+    if not ok2 then fail(ast_tree) end
+
+    if verbose then
+        print("=== AST ===")
+        helpers.print_ast_tree(ast_tree)
+    end
+
+    local ok3, err = pcall(checker.check, ast_tree, meta)
+    if not ok3 then fail(err) end
+
+    local ok4, lua_source = pcall(codegen.generate, ast_tree)
+    if not ok4 then fail(lua_source) end
+
+    if run then
+        local chunk, load_err = loadstring(lua_source, "=" .. (input_path or "stdin"))
+        if not chunk then fail("generated code failed to load: " .. tostring(load_err)) end
+        local run_ok, run_err = pcall(chunk)
+        if not run_ok then fail("runtime: " .. tostring(run_err)) end
+    elseif output_path then
+        local out, oerr = io.open(output_path, "w")
+        if not out then fail("cannot write '" .. output_path .. "': " .. tostring(oerr)) end
+        out:write(lua_source, "\n")
+        out:close()
+        print("wrote " .. output_path)
+    else
+        print(lua_source)
     end
 end
 

@@ -194,6 +194,7 @@ end
 --    canonical representation decided for nullability.
 -- ===========================================================================
 local class_registry = {}
+local qname_taken = {}       -- unique flat names for emitted classes
 
 local function from_ast(node, scope)
     if not node then return T_ANY end
@@ -285,6 +286,7 @@ end
 
 
 local check_stmt, infer_expr  -- mutually recursive
+local check_stmt_raw          -- depth-capped body of check_stmt
 
 local function type_error(msg, node)
     local where = ""
@@ -362,7 +364,7 @@ infer_expr = function(node, scope, allow_type)
         if not t then
             type_error("undefined variable '" .. node.name .. "'", node)
         end
-        if t.kind == "class" and not allow_type then
+        if t.kind == "class" and t.class_type ~= "object" and not allow_type then
             local owner = lookup_owner(scope, node.name)
             if owner.type_bindings and owner.type_bindings[node.name] then
                 type_error("cannot use type '" .. node.name .. "' as a value", node)
@@ -466,6 +468,17 @@ infer_expr = function(node, scope, allow_type)
     end
 
     if kind == "FunctionCall" then
+        -- select is tuple-aware, not a plain function:
+        --   select("#", ...) -> number | select(n, ...) -> (n-1) values
+        if node.func.type == "Identifier" and node.func.name == "select" then
+            local a1 = node.arguments[1]
+            if a1 and a1.type == "String" and a1.value == "#" then
+                for i = 2, #node.arguments do infer_expr(node.arguments[i], scope) end
+                return T_NUMBER
+            end
+            for _, a in ipairs(node.arguments) do infer_expr(a, scope) end
+            return T_UNKNOWN
+        end
         local ft = infer_expr(node.func, scope, true)
         if ft.kind ~= "function" then
             if ft.kind == "primitive" and ft.name == "any" then
@@ -476,7 +489,7 @@ infer_expr = function(node, scope, allow_type)
                 if ft.singleton or ft.abstract or ft.class_type == "interface" then
                     type_error(ft.name .. " cannot be instantiated", node)   -- per-kind rules
                 end
-                node.ctor_class = ft.name
+                node.ctor_class = ft.qname or ft.name
                 -- data: params required (parser enforced ≥1, checker enforces presence here)
                 if #node.arguments ~= #ft.ctor_params then
                     type_error("expected " .. #ft.ctor_params .. " constructor arguments", node)
@@ -574,7 +587,7 @@ infer_expr = function(node, scope, allow_type)
                 end
             end
             if declarers <= 1 and obj_t.class_type ~= "interface" then
-                node.devirt_owner = owner.name
+                node.devirt_owner = owner.qname or owner.name
             end
             if m.kind == "function" then
                 if not m.varargs and #node.arguments + 1 > #m.params then
@@ -663,6 +676,10 @@ infer_expr = function(node, scope, allow_type)
 
     if kind == "ClassDeclaration" then
         local fn_type = {kind = "class"}
+    end
+
+    if kind == "Paren" then
+        return infer_expr(node.expr, scope)     -- typing passes through
     end
 
     if kind == "NotNullAssertion" then
@@ -863,6 +880,17 @@ end
 
 local function call_rets(node, scope)
     infer_expr(node, scope)                       -- full call check: arity + args
+    if node.type == "Paren" then node = node.expr end   -- (f()) truncates to one ret
+    -- select(n, ...) spreads n-1 unknowns into the assignment targets
+    if node.type == "FunctionCall" and node.func.type == "Identifier"
+          and node.func.name == "select"
+          and node.arguments[1] and node.arguments[1].type == "Number" then
+        local rets = {}
+        for _ = 2, math.floor(node.arguments[1].value) do
+            rets[#rets + 1] = T_UNKNOWN
+        end
+        return rets
+    end
     if node.type == "FunctionCall" then
         local ft = infer_expr(node.func, scope, true)   -- callee's function type → rets
         if ft.kind == "function" and ft.rets and #ft.rets > 0 then
@@ -873,7 +901,19 @@ local function call_rets(node, scope)
 end
 
 -- check_stmt(node, scope) — statements produce nothing; they constrain
+local check_depth = 0
+
 check_stmt = function(node, scope)
+    check_depth = check_depth + 1
+    if check_depth > 1500 then
+        check_depth = check_depth - 1
+        type_error("nesting too deep (limit 1500)", node)
+    end
+    check_stmt_raw(node, scope)
+    check_depth = check_depth - 1
+end
+
+check_stmt_raw = function(node, scope)
     local kind = node.type
 
     if kind == "LocalDeclaration" then
@@ -1004,7 +1044,31 @@ check_stmt = function(node, scope)
                 local t = lookup(scope, ident.name)
                 if t then
                     local narrowed = strip_nil(t)
-                    if narrowed ~= t then
+                    -- soundness: if the then-block ASSIGNS the name, the
+                    -- narrowed shadow would lie about the new value — skip it
+                    local function assigns_name(node)
+                        if type(node) ~= "table" then return false end
+                        if node.type then
+                            if node.type == "Assignment" and node.targets then
+                                for _, tgt in ipairs(node.targets) do
+                                    if tgt.type == "Identifier" and tgt.name == ident.name then
+                                        return true
+                                    end
+                                end
+                            end
+                            for k, v in pairs(node) do
+                                if k ~= "type" and type(v) == "table" and assigns_name(v) then
+                                    return true
+                                end
+                            end
+                        else
+                            for _, v in ipairs(node) do
+                                if assigns_name(v) then return true end
+                            end
+                        end
+                        return false
+                    end
+                    if narrowed ~= t and not assigns_name(node.thenBlock) then
                         declare(then_scope, ident.name, narrowed)
                     end
                 end
@@ -1141,13 +1205,21 @@ check_stmt = function(node, scope)
             end
             ct = class(node.name.name, node.class_type, node.abstract, {}, {}, nil)
             ct.line = node.line                                 -- function-local: fresh type
+            local qn = node.name.name
+            local bump = 2
+            while qname_taken[qn] do qn = node.name.name .. "_" .. bump; bump = bump + 1 end
+            qname_taken[qn] = true
+            ct.qname = qn                                       -- emitter-safe flat name
         end
+        ct.qname = ct.qname or node.name.name
+        node.qname = ct.qname
         if node.extends_name then
             local base = lookup(scope, node.extends_name.name)
             if not base or base.kind ~= "class" then
                 type_error("unknown superclass '" .. node.extends_name.name .. "'", node)
             end
             ct.base_class = base
+            node.extends_qname = base.qname or base.name
         end
 
         -- member walk: fields, ctor_params, methods, bodies (fills the type)
@@ -1219,6 +1291,15 @@ check_stmt = function(node, scope)
                 if s_self and a_self and not compatible(s_self, a_self) then
                     type_error("override of '" .. mname .. "' has an incompatible self type", m)
                 end
+                -- param positions: match-or-widen — the base's argument must
+                -- flow into the override's parameter (contravariant-ish)
+                for i = 2, math.min(#m.params, #ancestor_m.params) do
+                    local s_p, a_p = m.params[i], ancestor_m.params[i]
+                    if s_p and a_p and not compatible(a_p, s_p) then
+                        type_error("override of '" .. mname .. "' parameter " .. (i - 1)
+                            .. " type mismatch", m)
+                    end
+                end
             end
         end
 
@@ -1283,6 +1364,7 @@ function Checker.check(ast_nodes, meta)
     end
      -- Step 5: class registry — collect, build, wire
     local class_types = {}
+    for k in pairs(qname_taken) do qname_taken[k] = nil end
     for _, stmt in ipairs(ast_nodes) do
         if stmt.type == "ClassDeclaration" then
             local primitives = { number = true, string = true, boolean = true,
@@ -1299,6 +1381,8 @@ function Checker.check(ast_nodes, meta)
             local shell = class(stmt.name.name, stmt.class_type,
                 stmt.abstract, {}, {}, nil)                     -- ← REPLACES lines 903-919
             shell.line = stmt.line
+            shell.qname = stmt.name.name                        -- top-level: qname == name
+            qname_taken[stmt.name.name] = true
             class_types[stmt.name.name] = shell
             declare(global_scope, stmt.name.name, shell)        -- ← NEW: the forward-ref line
             global_scope.type_bindings = global_scope.type_bindings or {}

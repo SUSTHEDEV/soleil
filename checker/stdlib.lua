@@ -16,6 +16,7 @@ local function record(fields) return { kind = "record", fields = fields } end
 
 return {
     ["print"] = fn({ A }, NIL, true),
+    ["select"] = fn({ A }, A, true),   -- tuple-awareness is special-cased in the checker
     ["type"]  = fn({ A }, S),
     ["string"] = record({
         sub    = fn({ S, N, opt(N) }, S),

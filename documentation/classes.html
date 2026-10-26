@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>
+  (function () {
+    var stored = null;
+    try { stored = localStorage.getItem("soleil-theme"); } catch (e) {}
+    var theme = stored === "dark" || stored === "light"
+      ? stored
+      : (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = theme;
+  })();
+</script>
+<title>Classes & Objects — Soleil</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script type="module">
+  import {styles as typescaleStyles} from 'https://esm.sh/@material/web@2.5.0/typography/md-typescale-styles.js';
+  document.adoptedStyleSheets.push(typescaleStyles.styleSheet);
+  import 'https://esm.sh/@material/web@2.5.0/all.js';
+</script>
+</head>
+<body>
+
+<header class="app-bar">
+  <md-icon-button aria-label="Menu"><md-icon>menu</md-icon></md-icon-button>
+  <a class="brand" href="index.html">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="11" cy="12.5" r="10" fill="none" stroke="currentColor" stroke-width="1" opacity=".4"/>
+      <circle cx="11" cy="12.5" r="7" fill="currentColor"/>
+      <circle cx="18" cy="5.5" r="2.2" fill="currentColor"/>
+      <circle cx="14.4" cy="3.1" r="1.1" fill="currentColor"/>
+    </svg>
+    <span class="title-large">Soleil</span>
+  </a>
+  <md-filled-text-field
+    class="search"
+    type="search"
+    placeholder="Search the Soleil docs..."
+    aria-label="Search the Soleil docs">
+    <md-icon slot="leading-icon">search</md-icon>
+  </md-filled-text-field>
+  <md-icon-button id="theme-toggle" aria-label="Toggle theme"><md-icon id="theme-icon">dark_mode</md-icon></md-icon-button>
+</header>
+
+<div class="layout">
+
+  <nav class="nav" aria-label="Docs navigation">
+    <span class="nav-heading label-large">LANGUAGE</span>
+    <md-list-item type="link" href="index.html">
+      <md-icon slot="start">home</md-icon>
+      <span slot="headline">Overview</span>
+    </md-list-item>
+    <md-list-item type="link" href="syntax.html">
+      <md-icon slot="start">rocket_launch</md-icon>
+      <span slot="headline">Getting Started</span>
+    </md-list-item>
+    <md-list-item type="link" href="index.html#builds">
+      <md-icon slot="start">layers</md-icon>
+      <span slot="headline">Compiler Builds</span>
+    </md-list-item>
+    <md-list-item type="link" href="tooling.html">
+      <md-icon slot="start">terminal</md-icon>
+      <span slot="headline">Tooling</span>
+    </md-list-item>
+    <span class="nav-heading label-large">DOCUMENTATION</span>
+    <span class="nav-heading label-medium" style="padding:4px 16px;opacity:.7">CORE</span>
+    <md-list-item type="link" href="syntax.html">
+      <md-icon slot="start">code</md-icon>
+      <span slot="headline">Syntax</span>
+    </md-list-item>
+    <md-list-item type="link" href="types.html">
+      <md-icon slot="start">data_object</md-icon>
+      <span slot="headline">Type System</span>
+    </md-list-item>
+    <md-list-item type="link" href="null-operators.html">
+      <md-icon slot="start">question_mark</md-icon>
+      <span slot="headline">Null Operators</span>
+    </md-list-item>
+    <md-list-item type="link" href="functions.html">
+      <md-icon slot="start">functions</md-icon>
+      <span slot="headline">Functions</span>
+    </md-list-item>
+    <md-list-item type="link" href="modules.html">
+      <md-icon slot="start">package</md-icon>
+      <span slot="headline">Modules &amp; Scope</span>
+    </md-list-item>
+    <md-list-item type="link" href="classes.html" class="active">
+      <md-icon slot="start">workspaces</md-icon>
+      <span slot="headline">Classes &amp; Objects</span>
+    </md-list-item>
+    <span class="nav-heading label-medium" style="padding:4px 16px;opacity:.7">ADVANCED</span>
+    <md-list-item type="link" href="errors.html">
+      <md-icon slot="start">error</md-icon>
+      <span slot="headline">Error Handling</span>
+    </md-list-item>
+    <md-list-item type="link" href="metatables.html">
+      <md-icon slot="start">sync</md-icon>
+      <span slot="headline">Metatables &amp; Coroutines</span>
+    </md-list-item>
+    <span class="nav-heading label-large">RESOURCES</span>
+    <md-list-item type="button">
+      <md-icon slot="start">science</md-icon>
+      <span slot="headline">Examples</span>
+    </md-list-item>
+    <md-list-item type="button">
+      <md-icon slot="start">history</md-icon>
+      <span slot="headline">Changelog</span>
+    </md-list-item>
+  </nav>
+
+  <main class="content doc">
+    <header class="page-header">
+      <span class="kicker label-large">DOCUMENTATION — CORE</span>
+      <h1>Classes &amp; Objects</h1>
+      <p class="body-large">Classes are nominal types with single inheritance. Constructor parameters live in the class header and become checked fields — no setmetatable ceremony.</p>
+    </header>
+
+    <section id="declaring">
+      <h2>Declaring a class</h2>
+      <p class="body-large">Constructor parameters are declared in the class header and are automatically promoted to fields. Required params are declared non-null; optional ones take <code>?</code>. Classes nest and localize freely — the compiler assigns each a unique flat runtime name, so same-named local classes coexist.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">player.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">class</span> <span class="tok-fn">Player</span>(name : string, id : number)
+    <span class="tok-kw">function</span> <span class="tok-fn">say</span>(<span class="tok-kw">self</span> : Player, msg : string)
+        <span class="tok-fn">print</span>(<span class="tok-kw">self</span>.name .. <span class="tok-str">" says: "</span> .. msg)
+    <span class="tok-kw">end</span>
+
+    <span class="tok-kw">function</span> <span class="tok-fn">id_value</span>(<span class="tok-kw">self</span> : Player) : number
+        <span class="tok-kw">return</span> <span class="tok-kw">self</span>.id
+    <span class="tok-kw">end</span>
+<span class="tok-kw">end</span></code></pre>
+      </div>
+    </section>
+
+    <section id="instances">
+      <h2>Creating instances</h2>
+      <p class="body-large">A class is callable: constructing is a direct call, checked for arity and argument types. Method calls use Lua's colon sugar, which injects the receiver as self.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">instances.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">local</span> p : Player = <span class="tok-fn">Player</span>(<span class="tok-str">"bob"</span>, <span class="tok-num">42</span>)
+p:<span class="tok-fn">say</span>(<span class="tok-str">"hello"</span>)              <span class="tok-com">-- bob says: hello</span>
+
+<span class="tok-kw">local</span> n : number = p.<span class="tok-fn">id_value</span>()
+<span class="tok-fn">print</span>(n)                    <span class="tok-com">-- 42</span></code></pre>
+      </div>
+    </section>
+
+    <section id="inheritance">
+      <h2>Inheritance</h2>
+      <p class="body-large">extends declares single inheritance; super-constructor arguments go in the header. Overriding an inherited method requires the override keyword, and self narrows to the subclass. Inside an override, super.m(self, ...) reaches the parent.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">admin.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">class</span> <span class="tok-fn">Admin</span>(role : string) <span class="tok-kw">extends</span> <span class="tok-fn">Player</span>(<span class="tok-str">"admin"</span>, <span class="tok-num">0</span>)
+    <span class="tok-kw">override</span> <span class="tok-kw">function</span> <span class="tok-fn">say</span>(<span class="tok-kw">self</span> : Admin, msg : string)
+        <span class="tok-fn">print</span>(<span class="tok-str">"["</span> .. <span class="tok-kw">self</span>.role .. <span class="tok-str">"] "</span> .. msg)
+    <span class="tok-kw">end</span>
+<span class="tok-kw">end</span>
+
+<span class="tok-kw">local</span> a : Admin = <span class="tok-fn">Admin</span>(<span class="tok-str">"root"</span>)
+a:<span class="tok-fn">say</span>(<span class="tok-str">"override works"</span>)
+
+<span class="tok-kw">local</span> x : Player = a   <span class="tok-com">-- ok: Admin is a Player</span>
+x:<span class="tok-fn">say</span>(<span class="tok-str">"dynamic"</span>)       <span class="tok-com">-- dispatches to Admin.say</span></code></pre>
+      </div>
+    </section>
+
+    <section id="abstract">
+      <h2>Abstract classes</h2>
+      <p class="body-large">An abstract class cannot be instantiated and may declare abstract methods — signatures without bodies that concrete subclasses must implement (with override).</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">abstract.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">abstract</span> <span class="tok-kw">class</span> Animal
+    <span class="tok-kw">abstract</span> <span class="tok-kw">function</span> <span class="tok-fn">speak</span>(<span class="tok-kw">self</span> : Animal) : string
+<span class="tok-kw">end</span>
+
+<span class="tok-kw">class</span> Dog <span class="tok-kw">extends</span> <span class="tok-fn">Animal</span>(<span class="tok-str">"woof"</span>)
+    <span class="tok-kw">override</span> <span class="tok-kw">function</span> <span class="tok-fn">speak</span>(<span class="tok-kw">self</span> : Dog) : string
+        <span class="tok-kw">return</span> <span class="tok-str">"woof"</span>
+    <span class="tok-kw">end</span>
+<span class="tok-kw">end</span></code></pre>
+      </div>
+    </section>
+
+    <section id="final">
+      <h2>final classes</h2>
+      <p class="body-large">The final prefix seals a class: it cannot be extended. Since no subclass can exist, every method call on a final-typed receiver compiles to a direct flat call — monomorphic by construction, even when unrelated classes share the method name. final abstract is rejected as contradictory.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">final.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code>final <span class="tok-kw">class</span> <span class="tok-fn">Token</span>(kind : string, value : string)
+    <span class="tok-kw">function</span> <span class="tok-fn">render</span>(<span class="tok-kw">self</span> : Token) : string
+        <span class="tok-kw">return</span> <span class="tok-kw">self</span>.kind .. <span class="tok-str">":"</span> .. <span class="tok-kw">self</span>.value
+    <span class="tok-kw">end</span>
+<span class="tok-kw">end</span>
+
+<span class="tok-com">-- class Sub extends Token("x", "y") end  -- error: Token is final</span></code></pre>
+      </div>
+
+      <p class="note body-medium">Member-level final methods are planned — class-level sealing ships today.</p>
+    </section>
+
+    <section id="data">
+      <h2>data and object</h2>
+      <p class="body-large">data declares a plain record: constructor parameters become fields, and that is all. object declares a singleton with methods — its self needs no type annotation.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">data.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">data</span> <span class="tok-fn">Pair</span>(a : number, b : number) <span class="tok-kw">end</span>
+
+<span class="tok-kw">local</span> p = <span class="tok-fn">Pair</span>(<span class="tok-num">1</span>, <span class="tok-num">2</span>)
+<span class="tok-fn">print</span>(p.a + p.b) <span class="tok-com">-- 3</span>
+
+<span class="tok-kw">object</span> Registry
+    <span class="tok-kw">function</span> <span class="tok-fn">put</span>(<span class="tok-kw">self</span>, k : string, v : number)
+        <span class="tok-fn">print</span>(<span class="tok-str">"stored "</span> .. k)
+    <span class="tok-kw">end</span>
+<span class="tok-kw">end</span>
+
+Registry:<span class="tok-fn">put</span>(<span class="tok-str">"key"</span>, <span class="tok-num">1</span>)</code></pre>
+      </div>
+    </section>
+
+    <section id="interfaces">
+      <h2>Interfaces</h2>
+      <p class="body-large">An interface declares a contract: required method signatures, optionally constructor mandates in its header. Classes satisfy them with implements (several at once). Interfaces may also provide default method bodies. An interface itself cannot be instantiated.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">shapes.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">interface</span> <span class="tok-fn">Shape</span>(name : string)
+    <span class="tok-kw">function</span> <span class="tok-fn">area</span>(<span class="tok-kw">self</span> : Shape) : number
+<span class="tok-kw">end</span>
+
+<span class="tok-kw">class</span> <span class="tok-fn">Circle</span>(x : number, name : string) <span class="tok-kw">implements</span> Shape
+    <span class="tok-kw">function</span> <span class="tok-fn">area</span>(<span class="tok-kw">self</span> : Circle) : number
+        <span class="tok-kw">return</span> <span class="tok-num">3</span>
+    <span class="tok-kw">end</span>
+<span class="tok-kw">end</span>
+
+<span class="tok-kw">local</span> s : Shape = <span class="tok-fn">Circle</span>(<span class="tok-num">1</span>, <span class="tok-str">"unit"</span>) <span class="tok-com">-- ok: Circle is a Shape</span></code></pre>
+      </div>
+    </section>
+
+    <nav class="pn" aria-label="Pagination">
+      <a href="modules.html"><span class="dir label-medium">Previous</span><span class="name title-medium">Modules &amp; Scope</span></a>      <a class="next" href="errors.html"><span class="dir label-medium">Up next</span><span class="name title-medium">Error Handling</span></a>
+    </nav>
+  </main>
+
+  <aside class="toc" aria-label="On this page">
+    <span class="label-large" style="color:var(--on-surface-variant)">ON THIS PAGE</span>
+    <a href="#declaring">Declaring a class</a>
+    <a href="#instances">Creating instances</a>
+    <a href="#inheritance">Inheritance</a>
+    <a href="#abstract">Abstract classes</a>
+    <a href="#final">final classes</a>
+    <a href="#data">data and object</a>
+    <a href="#interfaces">Interfaces</a>
+  </aside>
+
+</div>
+
+<footer class="footer">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" aria-hidden="true" style="width:24px;height:24px">
+      <circle cx="11" cy="12.5" r="10" fill="none" stroke="currentColor" stroke-width="1" opacity=".4"/>
+      <circle cx="11" cy="12.5" r="7" fill="currentColor"/>
+      <circle cx="18" cy="5.5" r="2.2" fill="currentColor"/>
+      <circle cx="14.4" cy="3.1" r="1.1" fill="currentColor"/>
+    </svg>
+    <span class="title-medium">Soleil</span>
+  </div>
+  <span class="body-small">© 2026 The Soleil Project. A typed, object-oriented dialect of Lua.</span>
+</footer>
+
+<md-fab variant="primary" aria-label="Back to top"><md-icon slot="icon">keyboard_arrow_up</md-icon></md-fab>
+
+<script src="site.js" defer></script>
+</body>
+</html>

@@ -1,3 +1,8 @@
+-- resolve imports relative to THIS script, not the caller's cwd
+-- (lua5.1 ../main.lua from a subdirectory must still find codegen/)
+local script_dir = (arg and arg[0] or ""):match("^(.*)/") or "."
+package.path = script_dir .. "/?.lua;" .. package.path
+
 local codegen = require("codegen.codegen")
 local parser = require("parser.parser")
 local helpers = require("helpers.compile_helpers")

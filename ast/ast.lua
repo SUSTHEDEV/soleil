@@ -237,7 +237,7 @@ function AST.Param(name, param_type)
     }
 end
 
-function AST.ClassDeclaration(name, params, body, abstract, singleton, class_type, extends_name, extends_args)
+function AST.ClassDeclaration(name, params, body, abstract, singleton, class_type, extends_name, extends_args, implements_list)
     return {
         type = "ClassDeclaration",
         name = name,              -- Identifier
@@ -248,6 +248,7 @@ function AST.ClassDeclaration(name, params, body, abstract, singleton, class_typ
         class_type = class_type, -- "class" | "interface" | "data"
         extends_name = extends_name,   -- Identifier or nil
         extends_args = extends_args,   -- {expression...} or nil
+        implements_list = implements_list,  -- {Identifier...} or nil: implemented interfaces
     }
 end
 

@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>
+  (function () {
+    var stored = null;
+    try { stored = localStorage.getItem("soleil-theme"); } catch (e) {}
+    var theme = stored === "dark" || stored === "light"
+      ? stored
+      : (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = theme;
+  })();
+</script>
+<title>Tooling — Soleil</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script type="module">
+  import {styles as typescaleStyles} from 'https://esm.sh/@material/web@2.5.0/typography/md-typescale-styles.js';
+  document.adoptedStyleSheets.push(typescaleStyles.styleSheet);
+  import 'https://esm.sh/@material/web@2.5.0/all.js';
+</script>
+</head>
+<body>
+
+<header class="app-bar">
+  <md-icon-button aria-label="Menu"><md-icon>menu</md-icon></md-icon-button>
+  <a class="brand" href="index.html">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="11" cy="12.5" r="10" fill="none" stroke="currentColor" stroke-width="1" opacity=".4"/>
+      <circle cx="11" cy="12.5" r="7" fill="currentColor"/>
+      <circle cx="18" cy="5.5" r="2.2" fill="currentColor"/>
+      <circle cx="14.4" cy="3.1" r="1.1" fill="currentColor"/>
+    </svg>
+    <span class="title-large">Soleil</span>
+  </a>
+  <md-filled-text-field
+    class="search"
+    type="search"
+    placeholder="Search the Soleil docs..."
+    aria-label="Search the Soleil docs">
+    <md-icon slot="leading-icon">search</md-icon>
+  </md-filled-text-field>
+  <md-icon-button id="theme-toggle" aria-label="Toggle theme"><md-icon id="theme-icon">dark_mode</md-icon></md-icon-button>
+</header>
+
+<div class="layout">
+
+  <nav class="nav" aria-label="Docs navigation">
+    <span class="nav-heading label-large">LANGUAGE</span>
+    <md-list-item type="link" href="index.html">
+      <md-icon slot="start">home</md-icon>
+      <span slot="headline">Overview</span>
+    </md-list-item>
+    <md-list-item type="link" href="syntax.html">
+      <md-icon slot="start">rocket_launch</md-icon>
+      <span slot="headline">Getting Started</span>
+    </md-list-item>
+    <md-list-item type="link" href="index.html#builds">
+      <md-icon slot="start">layers</md-icon>
+      <span slot="headline">Compiler Builds</span>
+    </md-list-item>
+    <md-list-item type="link" href="tooling.html" class="active">
+      <md-icon slot="start">terminal</md-icon>
+      <span slot="headline">Tooling</span>
+    </md-list-item>
+    <span class="nav-heading label-large">DOCUMENTATION</span>
+    <span class="nav-heading label-medium" style="padding:4px 16px;opacity:.7">CORE</span>
+    <md-list-item type="link" href="syntax.html">
+      <md-icon slot="start">code</md-icon>
+      <span slot="headline">Syntax</span>
+    </md-list-item>
+    <md-list-item type="link" href="types.html">
+      <md-icon slot="start">data_object</md-icon>
+      <span slot="headline">Type System</span>
+    </md-list-item>
+    <md-list-item type="link" href="null-operators.html">
+      <md-icon slot="start">question_mark</md-icon>
+      <span slot="headline">Null Operators</span>
+    </md-list-item>
+    <md-list-item type="link" href="functions.html">
+      <md-icon slot="start">functions</md-icon>
+      <span slot="headline">Functions</span>
+    </md-list-item>
+    <md-list-item type="link" href="modules.html">
+      <md-icon slot="start">package</md-icon>
+      <span slot="headline">Modules &amp; Scope</span>
+    </md-list-item>
+    <md-list-item type="link" href="classes.html">
+      <md-icon slot="start">workspaces</md-icon>
+      <span slot="headline">Classes &amp; Objects</span>
+    </md-list-item>
+    <span class="nav-heading label-medium" style="padding:4px 16px;opacity:.7">ADVANCED</span>
+    <md-list-item type="link" href="errors.html">
+      <md-icon slot="start">error</md-icon>
+      <span slot="headline">Error Handling</span>
+    </md-list-item>
+    <md-list-item type="link" href="metatables.html">
+      <md-icon slot="start">sync</md-icon>
+      <span slot="headline">Metatables &amp; Coroutines</span>
+    </md-list-item>
+    <span class="nav-heading label-large">RESOURCES</span>
+    <md-list-item type="button">
+      <md-icon slot="start">science</md-icon>
+      <span slot="headline">Examples</span>
+    </md-list-item>
+    <md-list-item type="button">
+      <md-icon slot="start">history</md-icon>
+      <span slot="headline">Changelog</span>
+    </md-list-item>
+  </nav>
+
+  <main class="content doc">
+    <header class="page-header">
+      <span class="kicker label-large">LANGUAGE — TOOLING</span>
+      <h1>Tooling</h1>
+      <p class="body-large">One compiler script drives everything: it picks the dialect by file extension, prints loud tiered errors, and emits plain Lua 5.1.</p>
+    </header>
+
+    <section id="cli">
+      <h2>The compiler</h2>
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">shell</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code>lua main.lua &lt;input.sol | input.lua&gt; [options]
+    -o, <span class="tok-com">--output &lt;file&gt;   write generated Lua (default: stdout)</span>
+    <span class="tok-com">--run                 compile and execute in-process</span>
+    -v, <span class="tok-com">--verbose         dump tokens and AST</span>
+    -h, <span class="tok-com">--help</span></code></pre>
+      </div>
+
+      <p class="body-large">Imports resolve relative to the compiler script, not the caller's working directory.</p>
+    </section>
+
+    <section id="dialects">
+      <h2>Two dialects, one parser</h2>
+      <p class="body-large">The extension picks the dialect: <code>.sol</code> files are soleil — the full grammar, parsed and type-checked — while <code>.lua</code> files are plain Lua: parsed and emitted, never type-checked. This lets existing Lua pass through the same pipeline untouched.</p>
+    </section>
+
+    <section id="errors">
+      <h2>Loud, tiered errors</h2>
+      <p class="body-large">The checker aborts on the first violation — there is no error recovery and no unchecked mode. Errors are tiered and carry line numbers: <code>Parse Error at line N: ...</code> from the front end, <code>type error at line N: ...</code> from the checker. All tiers exit non-zero. Nesting is bounded too: 100 nested functions at parse, 1500 statement levels in the checker and emitter — loud errors, never a C-stack crash.</p>
+    </section>
+
+    <section id="incomplete">
+      <h2>#!INCOMPLETE markers</h2>
+      <p class="body-large">A file may carry a <code>#!INCOMPLETE</code> marker (as a shebang or an inline <code>--#!INCOMPLETE</code> comment). The checker refuses to fully check a marked file unless lenient mode is requested through the API (<code>options.allow_incomplete</code>). This is how in-progress stdlib declaration files stay honest.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">libstring.hds</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code>#!INCOMPLETE: <span class="tok-num">3</span> of <span class="tok-num">12</span> functions could <span class="tok-kw">not</span> be typed
+<span class="tok-com">-- libstring.hds — declarations for Lua's string library</span>
+
+<span class="tok-kw">function</span> string.<span class="tok-fn">sub</span>(s : string, i : number, j : number?) : string <span class="tok-kw">end</span>
+<span class="tok-kw">function</span> string.<span class="tok-fn">len</span>(s : string) : number <span class="tok-kw">end</span></code></pre>
+      </div>
+    </section>
+
+    <section id="suites">
+      <h2>Test suites</h2>
+      <p class="body-large">Everything in the v1 core is locked behind the suites in <code>tests/</code>:</p>
+
+      <ul class="body-large">
+        <li>parser — 128 grammar probes (valid must parse, malformed must error)</li>
+        <li>checker — 192 semantic contracts (valid must check, invalid must fail with the right message)</li>
+        <li>integration — 19 whole-program scripts through the front end</li>
+        <li>corpus — 24 files of the Lua 5.1 test suite through parse → emit → loadstring</li>
+        <li>round-trip — 39 files: emit → re-parse → normalized AST equivalence</li>
+        <li>battery — 59,198 recursive combinations: nesting × field typing × payload shapes, plus adversarial expect-error contracts</li>
+      </ul>
+    </section>
+
+    <nav class="pn" aria-label="Pagination">
+      <a href="metatables.html"><span class="dir label-medium">Previous</span><span class="name title-medium">Metatables &amp; Coroutines</span></a>
+    </nav>
+  </main>
+
+  <aside class="toc" aria-label="On this page">
+    <span class="label-large" style="color:var(--on-surface-variant)">ON THIS PAGE</span>
+    <a href="#cli">The compiler</a>
+    <a href="#dialects">Two dialects, one parser</a>
+    <a href="#errors">Loud, tiered errors</a>
+    <a href="#incomplete">#!INCOMPLETE markers</a>
+    <a href="#suites">Test suites</a>
+  </aside>
+
+</div>
+
+<footer class="footer">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" aria-hidden="true" style="width:24px;height:24px">
+      <circle cx="11" cy="12.5" r="10" fill="none" stroke="currentColor" stroke-width="1" opacity=".4"/>
+      <circle cx="11" cy="12.5" r="7" fill="currentColor"/>
+      <circle cx="18" cy="5.5" r="2.2" fill="currentColor"/>
+      <circle cx="14.4" cy="3.1" r="1.1" fill="currentColor"/>
+    </svg>
+    <span class="title-medium">Soleil</span>
+  </div>
+  <span class="body-small">© 2026 The Soleil Project. A typed, object-oriented dialect of Lua.</span>
+</footer>
+
+<md-fab variant="primary" aria-label="Back to top"><md-icon slot="icon">keyboard_arrow_up</md-icon></md-fab>
+
+<script src="site.js" defer></script>
+</body>
+</html>

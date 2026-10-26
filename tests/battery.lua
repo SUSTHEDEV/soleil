@@ -77,12 +77,15 @@ local payloads = {
 }
 
 local fn_wrappers = {
-    { name = "fn_local",  params = 0, build = function(i, body, ret)
-        return "local function Wf" .. i .. "()\n" .. body .. "return " .. ret .. "\nend\n", "Wf" .. i .. "()" end },
-    { name = "fn_global", params = 0, build = function(i, body, ret)
-        return "function Wg" .. i .. "()\n" .. body .. "return " .. ret .. "\nend\n", "Wg" .. i .. "()" end },
-    { name = "anon",      params = 0, build = function(i, body, ret)
-        return "local Wa" .. i .. " = function()\n" .. body .. "return " .. ret .. "\nend\n", "Wa" .. i .. "()" end },
+    { name = "fn_local",  params = 0, build = function(i, body, ret, rtyp)
+        rtyp = rtyp or "number"
+        return "local function Wf" .. i .. "() : " .. rtyp .. "\n" .. body .. "return " .. ret .. "\nend\n", "Wf" .. i .. "()" end },
+    { name = "fn_global", params = 0, build = function(i, body, ret, rtyp)
+        rtyp = rtyp or "number"
+        return "function Wg" .. i .. "() : " .. rtyp .. "\n" .. body .. "return " .. ret .. "\nend\n", "Wg" .. i .. "()" end },
+    { name = "anon",      params = 0, build = function(i, body, ret, rtyp)
+        rtyp = rtyp or "number"
+        return "local Wa" .. i .. " = function() : " .. rtyp .. "\n" .. body .. "return " .. ret .. "\nend\n", "Wa" .. i .. "()" end },
     { name = "method",    params = 1, build = function(i, body, ret, rtyp)
         rtyp = rtyp or "number"
         return "class Wc" .. i .. "(x : number)\n    function run(self : Wc" .. i .. ") : " .. rtyp .. "\n"
@@ -223,9 +226,9 @@ end
 -- ---- hand-written adversarial recursive cases ----
 local adversarial = {
     { name = "forward local ref must error", expect_err = true, src =
-        "local function a() return b() end\nlocal function b() : number return 1 end" },
+        "local function a() : number return b() end\nlocal function b() : number return 1 end" },
     { name = "type used as value must error", expect_err = true, src =
-        "local function f()\n    class Q(x : number) end\n    return Q\nend" },
+        "local function f() : unknown\n    class Q(x : number) end\n    return Q\nend" },
     { name = "container element mismatch must error", expect_err = true, src =
         "local xs : table[number] = {1, \"x\"}" },
     { name = "unguarded union receiver must error", expect_err = true, src =
@@ -242,16 +245,17 @@ local adversarial = {
         "class A(x : number) end\n"
      .. "class B extends A\n    function f(self : B) : number return super.nope(self) end\nend" },
     { name = "dup local class same scope must error", expect_err = true, src =
-        "local function f()\n    class Q(x : number) end\n    class Q(y : number) end\n    return Q(1)\nend" },
+        "local function f() : unknown\n    class Q(x : number) end\n    class Q(y : number) end\n    return Q(1)\nend" },
     { name = "sibling fns, same local class name", want = "3", src =
-        "local function f()\n    class Q(x : number)\n        function g(self : Q) : number return self.x end\n    end\n    return Q(1):g()\nend\n"
-     .. "local function h()\n    class Q(x : number)\n        function g(self : Q) : number return self.x end\n    end\n    return Q(2):g()\nend\n"
+        "local function f() : number\n    class Q(x : number)\n        function g(self : Q) : number return self.x end\n    end\n    return Q(1):g()\nend\n"
+     .. "local function h() : number\n    class Q(x : number)\n        function g(self : Q) : number return self.x end\n    end\n    return Q(2):g()\nend\n"
      .. "print(f() + h())" },
     { name = "call-on-call factory closure", want = "8", src =
-        "local function mk(v : number)\n    class P(x : number)\n        function bump(self : P) : number return self.x + v end\n    end\n    return P(v)\nend\n"
+        "interface Bumpable\n    function bump(self : Bumpable) : number\nend\n"
+     .. "local function mk(v : number) : Bumpable\n    class P(x : number) implements Bumpable\n        function bump(self : P) : number return self.x + v end\n    end\n    return P(v)\nend\n"
      .. "print(mk(4):bump())" },
     { name = "class inside for inside fn", want = "8", src =
-        "local function f()\n    for i = 1, 1 do\n        class S(k : number)\n            function get(self : S) : number return self.k end\n        end\n"
+        "local function f() : number\n    for i = 1, 1 do\n        class S(k : number)\n            function get(self : S) : number return self.k end\n        end\n"
      .. "        local s = S(8)\n        return s:get()\n    end\n    return 0\nend\nprint(f())" },
     { name = "sibling method call", want = "12", src =
         "class R(n : number)\n    function twice(self : R) : number return self.n + self.n end\n"
@@ -266,8 +270,8 @@ local adversarial = {
      .. "        local function add(a : number, b : number) : number return a + b end\n"
      .. "        return add(self.n, self.n)\n    end\nend\nprint(M(5):calc())" },
     { name = "depth-4 fn>method>fn>method>class", want = "21", src =
-        "local function outer()\n    class L1(q : number)\n        function go(self : L1) : number\n"
-     .. "            local function mid()\n                class L2(r : number)\n                    function run(self : L2) : number\n"
+        "local function outer() : number\n    class L1(q : number)\n        function go(self : L1) : number\n"
+     .. "            local function mid() : number\n                class L2(r : number)\n                    function run(self : L2) : number\n"
      .. "                        local function leaf(v : number) : number return v * 3 end\n"
      .. "                        return leaf(self.r + 4)\n                    end\n                end\n"
      .. "                return L2(3):run()\n            end\n            return mid()\n        end\n    end\n"

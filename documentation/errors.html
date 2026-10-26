@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>
+  (function () {
+    var stored = null;
+    try { stored = localStorage.getItem("soleil-theme"); } catch (e) {}
+    var theme = stored === "dark" || stored === "light"
+      ? stored
+      : (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = theme;
+  })();
+</script>
+<title>Error Handling — Soleil</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script type="module">
+  import {styles as typescaleStyles} from 'https://esm.sh/@material/web@2.5.0/typography/md-typescale-styles.js';
+  document.adoptedStyleSheets.push(typescaleStyles.styleSheet);
+  import 'https://esm.sh/@material/web@2.5.0/all.js';
+</script>
+</head>
+<body>
+
+<header class="app-bar">
+  <md-icon-button aria-label="Menu"><md-icon>menu</md-icon></md-icon-button>
+  <a class="brand" href="index.html">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="11" cy="12.5" r="10" fill="none" stroke="currentColor" stroke-width="1" opacity=".4"/>
+      <circle cx="11" cy="12.5" r="7" fill="currentColor"/>
+      <circle cx="18" cy="5.5" r="2.2" fill="currentColor"/>
+      <circle cx="14.4" cy="3.1" r="1.1" fill="currentColor"/>
+    </svg>
+    <span class="title-large">Soleil</span>
+  </a>
+  <md-filled-text-field
+    class="search"
+    type="search"
+    placeholder="Search the Soleil docs..."
+    aria-label="Search the Soleil docs">
+    <md-icon slot="leading-icon">search</md-icon>
+  </md-filled-text-field>
+  <md-icon-button id="theme-toggle" aria-label="Toggle theme"><md-icon id="theme-icon">dark_mode</md-icon></md-icon-button>
+</header>
+
+<div class="layout">
+
+  <nav class="nav" aria-label="Docs navigation">
+    <span class="nav-heading label-large">LANGUAGE</span>
+    <md-list-item type="link" href="index.html">
+      <md-icon slot="start">home</md-icon>
+      <span slot="headline">Overview</span>
+    </md-list-item>
+    <md-list-item type="link" href="syntax.html">
+      <md-icon slot="start">rocket_launch</md-icon>
+      <span slot="headline">Getting Started</span>
+    </md-list-item>
+    <md-list-item type="link" href="index.html#builds">
+      <md-icon slot="start">layers</md-icon>
+      <span slot="headline">Compiler Builds</span>
+    </md-list-item>
+    <md-list-item type="link" href="tooling.html">
+      <md-icon slot="start">terminal</md-icon>
+      <span slot="headline">Tooling</span>
+    </md-list-item>
+    <span class="nav-heading label-large">DOCUMENTATION</span>
+    <span class="nav-heading label-medium" style="padding:4px 16px;opacity:.7">CORE</span>
+    <md-list-item type="link" href="syntax.html">
+      <md-icon slot="start">code</md-icon>
+      <span slot="headline">Syntax</span>
+    </md-list-item>
+    <md-list-item type="link" href="types.html">
+      <md-icon slot="start">data_object</md-icon>
+      <span slot="headline">Type System</span>
+    </md-list-item>
+    <md-list-item type="link" href="null-operators.html">
+      <md-icon slot="start">question_mark</md-icon>
+      <span slot="headline">Null Operators</span>
+    </md-list-item>
+    <md-list-item type="link" href="functions.html">
+      <md-icon slot="start">functions</md-icon>
+      <span slot="headline">Functions</span>
+    </md-list-item>
+    <md-list-item type="link" href="modules.html">
+      <md-icon slot="start">package</md-icon>
+      <span slot="headline">Modules &amp; Scope</span>
+    </md-list-item>
+    <md-list-item type="link" href="classes.html">
+      <md-icon slot="start">workspaces</md-icon>
+      <span slot="headline">Classes &amp; Objects</span>
+    </md-list-item>
+    <span class="nav-heading label-medium" style="padding:4px 16px;opacity:.7">ADVANCED</span>
+    <md-list-item type="link" href="errors.html" class="active">
+      <md-icon slot="start">error</md-icon>
+      <span slot="headline">Error Handling</span>
+    </md-list-item>
+    <md-list-item type="link" href="metatables.html">
+      <md-icon slot="start">sync</md-icon>
+      <span slot="headline">Metatables &amp; Coroutines</span>
+    </md-list-item>
+    <span class="nav-heading label-large">RESOURCES</span>
+    <md-list-item type="button">
+      <md-icon slot="start">science</md-icon>
+      <span slot="headline">Examples</span>
+    </md-list-item>
+    <md-list-item type="button">
+      <md-icon slot="start">history</md-icon>
+      <span slot="headline">Changelog</span>
+    </md-list-item>
+  </nav>
+
+  <main class="content doc">
+    <header class="page-header">
+      <span class="kicker label-large">DOCUMENTATION — ADVANCED</span>
+      <h1>Error Handling</h1>
+      <p class="body-large">Soleil inherits Lua's error model: raise with error, contain with pcall, and assert invariants with assert — all of it type-checked.</p>
+    </header>
+
+    <section id="raising">
+      <h2>Raising errors</h2>
+      <p class="body-large">error aborts the current function and unwinds to the nearest protected call. The second argument sets the error position level.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">raising.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">function</span> <span class="tok-fn">withdraw</span>(acct : table[string, number], amount : number) : number
+    <span class="tok-kw">if</span> (acct.balance ?: <span class="tok-num">0</span>) &amp;lt; amount <span class="tok-kw">then</span>
+        <span class="tok-fn">error</span>(<span class="tok-str">"insufficient funds"</span>)
+    <span class="tok-kw">end</span>
+    acct.balance = acct.balance - amount
+    <span class="tok-kw">return</span> acct.balance
+<span class="tok-kw">end</span></code></pre>
+      </div>
+    </section>
+
+    <section id="catching">
+      <h2>Containing with pcall</h2>
+      <p class="body-large">pcall runs a function in protected mode and returns a success flag followed by the result or the error. The stdlib signature is checked, so the flag lands as a boolean.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">pcall.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">local</span> ok, err = <span class="tok-fn">pcall</span>(<span class="tok-fn">function</span>()
+    <span class="tok-fn">error</span>(<span class="tok-str">"something exploded"</span>)
+<span class="tok-kw">end</span>)
+
+<span class="tok-kw">if</span> <span class="tok-kw">not</span> ok <span class="tok-kw">then</span>
+    <span class="tok-fn">print</span>(<span class="tok-str">"caught: "</span> .. <span class="tok-fn">tostring</span>(err))
+<span class="tok-kw">end</span></code></pre>
+      </div>
+    </section>
+
+    <section id="assert">
+      <h2>assert</h2>
+      <p class="body-large">assert raises when its first argument is false or nil, and passes the value through otherwise — the checked way to unwrap a nullable.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">assert.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">local</span> maybe_name : string? = <span class="tok-kw">nil</span>
+
+<span class="tok-kw">local</span> name : string = <span class="tok-fn">assert</span>(maybe_name, <span class="tok-str">"name is required"</span>)
+<span class="tok-fn">print</span>(name:<span class="tok-fn">len</span>())  <span class="tok-com">-- guaranteed non-nil here</span></code></pre>
+      </div>
+    </section>
+
+    <section id="patterns">
+      <h2>Patterns</h2>
+      <ul class="body-large">
+        <li>Return <code>number?</code> / <code>string?</code> for expected failures that callers handle with <code>?:</code> or <code>if ~= nil</code>.</li>
+        <li>Reserve <code>error</code> for bugs and broken invariants.</li>
+        <li>Wrap untyped Lua at module boundaries with <code>pcall</code>.</li>
+      </ul>
+    </section>
+
+    <nav class="pn" aria-label="Pagination">
+      <a href="classes.html"><span class="dir label-medium">Previous</span><span class="name title-medium">Classes &amp; Objects</span></a>      <a class="next" href="metatables.html"><span class="dir label-medium">Up next</span><span class="name title-medium">Metatables &amp; Coroutines</span></a>
+    </nav>
+  </main>
+
+  <aside class="toc" aria-label="On this page">
+    <span class="label-large" style="color:var(--on-surface-variant)">ON THIS PAGE</span>
+    <a href="#raising">Raising errors</a>
+    <a href="#catching">Containing with pcall</a>
+    <a href="#assert">assert</a>
+    <a href="#patterns">Patterns</a>
+  </aside>
+
+</div>
+
+<footer class="footer">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" aria-hidden="true" style="width:24px;height:24px">
+      <circle cx="11" cy="12.5" r="10" fill="none" stroke="currentColor" stroke-width="1" opacity=".4"/>
+      <circle cx="11" cy="12.5" r="7" fill="currentColor"/>
+      <circle cx="18" cy="5.5" r="2.2" fill="currentColor"/>
+      <circle cx="14.4" cy="3.1" r="1.1" fill="currentColor"/>
+    </svg>
+    <span class="title-medium">Soleil</span>
+  </div>
+  <span class="body-small">© 2026 The Soleil Project. A typed, object-oriented dialect of Lua.</span>
+</footer>
+
+<md-fab variant="primary" aria-label="Back to top"><md-icon slot="icon">keyboard_arrow_up</md-icon></md-fab>
+
+<script src="site.js" defer></script>
+</body>
+</html>

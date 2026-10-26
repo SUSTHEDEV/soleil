@@ -252,6 +252,28 @@ function Codegen.generate(ast_nodes)
                         end
                     end
                 end
+                -- interface defaults fill gaps no ancestor covers
+                for _, iq in ipairs(node.implements_qnames or {}) do
+                    local iface_node = class_nodes[iq]
+                    if iface_node then
+                        for _, m in ipairs(iface_node.body.statements) do
+                            if m.type == "FunctionDeclaration" and m.body and #m.body.statements > 0 then
+                                local defined = false
+                                for _, anc in ipairs(chain) do
+                                    for _, am in ipairs(anc.body.statements) do
+                                        if am.type == "FunctionDeclaration"
+                                              and am.name.name == m.name.name then
+                                            defined = true
+                                        end
+                                    end
+                                end
+                                if not defined then
+                                    emit("self." .. m.name.name .. " = __" .. iq .. "_" .. m.name.name)
+                                end
+                            end
+                        end
+                    end
+                end
                 emit("return self")
                 indent = indent - 1
                 emit("end")
@@ -261,8 +283,23 @@ function Codegen.generate(ast_nodes)
                     emit(node.name.name .. " = __" .. cname .. "_new()")
                 end
                 current_class = saved_class
+            else
+                -- interface v2: default methods carry CODE — flat functions
+                -- implementing classes reuse when they define none of their own
+                local iq = node.qname or node.name.name
+                for _, m in ipairs(node.body.statements) do
+                    if m.type == "FunctionDeclaration" and m.body and #m.body.statements > 0 then
+                        local params = {}
+                        for i, p in ipairs(m.parameters) do
+                            if i > 1 then params[#params + 1] = p.name.name end
+                        end
+                        emit("function __" .. iq .. "_" .. m.name.name
+                            .. "(self" .. (#params > 0 and ", " .. table.concat(params, ", ") or "") .. ")")
+                        codegen_block(m.body)
+                        emit("end")
+                    end
+                end
             end
-            -- interfaces emit nothing: contracts only
 
         else
             -- expression statements (calls): FunctionCall / MethodCall / Identifier
@@ -274,7 +311,18 @@ function Codegen.generate(ast_nodes)
     -- sub-expressions — correct-but-ugly beats pretty-but-wrong.
     codegen_expr = function(node)
         local kind = node.type
-        if kind == "Number" then return tostring(node.value) end
+        if kind == "Number" then
+            -- raw lexer text prints verbatim (10e500 stays 10e500 — printing
+            -- tostring(inf) would emit a bare identifier into the output).
+            -- Programmatic float values get the non-finite guard instead:
+            -- `inf`/`nan` are not number literals in Lua 5.1.
+            if type(node.value) == "string" then return node.value end
+            local v = node.value
+            if v ~= v then return "(0/0)" end
+            if v == math.huge then return "(1/0)" end
+            if v == -math.huge then return "(-1/0)" end
+            return tostring(v)
+        end
         if kind == "String" then
             -- %q escapes newlines as backslash+REAL newline; emit()'s
             -- re-indent would then inject spaces INTO the literal and shift
@@ -311,6 +359,12 @@ function Codegen.generate(ast_nodes)
         if kind == "FunctionCall" then
             local args = {}
             for _, a in ipairs(node.arguments) do args[#args + 1] = codegen_expr(a) end
+            -- static qualified member call: Outer.Inner.m(x) -> flat call
+            -- (the caller passes self explicitly; nothing is injected)
+            if node.func.type == "TableIndex" and node.func.static_owner then
+                return "__" .. node.func.static_owner .. "_" .. node.func.static_name
+                    .. "(" .. table.concat(args, ", ") .. ")"
+            end
             return prefix_str(node.func) .. "(" .. table.concat(args, ", ") .. ")"
         end
 

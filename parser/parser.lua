@@ -1,31 +1,29 @@
 -- DESIGN: concat '..' is STRICT — both operands must be strings (no Lua-style
 -- number coercion). Checkpoint: tostring(n). Confirmed by the OOP battery.
-local lpeg = require("lpeg") -- unused for now, but will be used later for more advanced parsing (better to keep this here for now)
 local ast = require("ast.ast")
-local config = require("config.config")
 
 local reserved_keywords = {
-    ["and"] = lpeg.P("and"),
-    ["break"] = lpeg.P("break"),
-    ["do"] = lpeg.P("do"),
-    ["else"] = lpeg.P("else"),
-    ["elseif"] = lpeg.P("elseif"),
-    ["end"] = lpeg.P("end"),
-    ["false"] = lpeg.P("false"),
-    ["for"] = lpeg.P("for"),
-    ["function"] = lpeg.P("function"),
-    ["if"] = lpeg.P("if"),
-    ["in"] = lpeg.P("in"),
-    ["local"] = lpeg.P("local"),
-    ["nil"] = lpeg.P("nil"),
-    ["not"] = lpeg.P("not"),
-    ["or"] = lpeg.P("or"),
-    ["repeat"] = lpeg.P("repeat"),
-    ["return"] = lpeg.P("return"),
-    ["then"] = lpeg.P("then"),
-    ["true"] = lpeg.P("true"),
-    ["until"] = lpeg.P("until"),
-    ["while"] = lpeg.P("while"),
+    ["and"] = "and",
+    ["break"] = "break",
+    ["do"] = "do",
+    ["else"] = "else",
+    ["elseif"] = "elseif",
+    ["end"] = "end",
+    ["false"] = "false",
+    ["for"] = "for",
+    ["function"] = "function",
+    ["if"] = "if",
+    ["in"] = "in",
+    ["local"] = "local",
+    ["nil"] = "nil",
+    ["not"] = "not",
+    ["or"] = "or",
+    ["repeat"] = "repeat",
+    ["return"] = "return",
+    ["then"] = "then",
+    ["true"] = "true",
+    ["until"] = "until",
+    ["while"] = "while",
     -- NOTE: "self" is deliberately NOT a keyword — it's an ordinary identifier
     -- (Lua convention, SPEC §4 rule 2). Do not add it back here.
     -- Future Soleil keywords (class, extends, super, data, abstract,
@@ -43,7 +41,9 @@ local soleil_keywords = {
     ["interface"] = true,
     ["implements"] = true,
     ["abstract"] = true,
+    ["final"] = true,
     ["override"] = true,
+    ["default"] = true,
     ["data"] = true,
     ["object"] = true,
 }
@@ -58,33 +58,33 @@ local ESCAPES = {
 }
 
 local reserved_symbols = {
-    ["+"] = lpeg.P("+"),
-    ["-"] = lpeg.P("-"),
-    ["*"] = lpeg.P("*"),
-    ["/"] = lpeg.P("/"),
-    ["%"] = lpeg.P("%"),
-    ["^"] = lpeg.P("^"),
-    ["#"] = lpeg.P("#"),
-    ["=="] = lpeg.P("=="),
-    ["~="] = lpeg.P("~="),
-    ["<="] = lpeg.P("<="),
-    [">="] = lpeg.P(">="),
-    [".."] = lpeg.P(".."),
-    ["<"] = lpeg.P("<"),
-    [">"] = lpeg.P(">"),
-    ["="] = lpeg.P("="),
-    ["("] = lpeg.P("("),
-    [")"] = lpeg.P(")"),
-    ["{"] = lpeg.P("{"),
-    ["}"] = lpeg.P("}"),
-    ["["] = lpeg.P("["),
-    ["]"] = lpeg.P("]"),
-    ["."] = lpeg.P("."),
-    [","] = lpeg.P(","),
-    [":"] = lpeg.P(":"),
-    ["?."] = lpeg.P("?."),
-    ["?:"] = lpeg.P("?:"),
-    ["!!"] = lpeg.P("!!")
+    ["+"] = "+",
+    ["-"] = "-",
+    ["*"] = "*",
+    ["/"] = "/",
+    ["%"] = "%",
+    ["^"] = "^",
+    ["#"] = "#",
+    ["=="] = "==",
+    ["~="] = "~=",
+    ["<="] = "<=",
+    [">="] = ">=",
+    [".."] = "..",
+    ["<"] = "<",
+    [">"] = ">",
+    ["="] = "=",
+    ["("] = "(",
+    [")"] = ")",
+    ["{"] = "{",
+    ["}"] = "}",
+    ["["] = "[",
+    ["]"] = "]",
+    ["."] = ".",
+    [","] = ",",
+    [":"] = ":",
+    ["?."] = "?.",
+    ["?:"] = "?:",
+    ["!!"] = "!!"
 } -- same as above
 
 function laxed_error(message)
@@ -336,7 +336,9 @@ function parse(tokens, markers)
         
         if i <= #tokens and token.type == "NUMBER" then
             i = i + 1
-            return ast.Number(tonumber(token.value))
+            -- RAW text, never converted: 10e500 must not become `inf`
+            -- (tostring(inf) emits a bare identifier into the output)
+            return ast.Number(token.value)
         elseif i <= #tokens and token.type == "STRING" then
             i = i + 1
             return ast.String(token.value)
@@ -813,6 +815,17 @@ function parse(tokens, markers)
         
         if token.type == "KEYWORD" and token.value == "local" then
             i = i + 1  -- skip 'local'
+            if tokens[i] and tokens[i].type == "KEYWORD"
+                  and (tokens[i].value == "class" or tokens[i].value == "interface"
+                       or tokens[i].value == "data" or tokens[i].value == "object") then
+                -- `local class` is redundant: classes are ALREADY scope-specific.
+                -- Accept with a warning and re-dispatch without the modifier.
+                local noun = tokens[i].value == "interface" and "an interface" or ("a " .. tokens[i].value)
+                parse_warn("'local' on " .. noun
+                    .. " declaration is redundant — classes are already scope-specific"
+                    .. " (line " .. tostring(tokens[i].line or "?") .. ")")
+                return parse_statement(scope, top_level)
+            end
             if tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "function" then
                 -- local function Name(...) ... end
                 -- desugars to: LocalDeclaration(Name, <anonymous function>)
@@ -893,16 +906,24 @@ function parse(tokens, markers)
             return parse_expression(scope)  -- function expression as a statement
         elseif token.type == "KEYWORD" and (token.value == "class"
                or token.value == "interface" or token.value == "data") then
-            return parse_class(token.value, scope)
+            return parse_class(token.value, false, scope)
         elseif token.type == "KEYWORD" and token.value == "abstract" then
             i = i + 1
             if not (tokens[i] and tokens[i].value == "class") then
                 parse_error("expected 'class' after 'abstract'")
             end
             return parse_class("class", true, scope)
+        elseif token.type == "KEYWORD" and token.value == "final" then
+            i = i + 1
+            if not (tokens[i] and tokens[i].value == "class") then
+                parse_error("expected 'class' after 'final'")
+            end
+            local node = parse_class("class", false, scope)
+            node.is_final = true                       -- cannot be extended
+            return node
         elseif token.type == "KEYWORD" and token.value == "object" then
             if top_level then
-                return parse_class("object", scope)
+                return parse_class("object", false, scope)
             end
             parse_error("objects can only be declared at the top level")
         elseif token.type == "KEYWORD" and token.value == "super" then
@@ -1153,15 +1174,12 @@ function parse(tokens, markers)
         local class_name = ast.Identifier(tokens[i].value)
         i = i + 1
 
-        -- header params: illegal on interface and object, required on data, optional on class
+        -- header params: interface v2 constructor MANDATES (types only), banned
+        -- on objects, required on data, optional on classes
         local params, param_varargs = {}, false
         if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "(" then
             if kind == "object" then
-                --[[
-                    - Currently for interfaces v1, as interface v2 will add support for required construction parameters
-                    - Singleton classes (objects) can never have construction parameters
-                ]]
-                parse_error(kind.."s cannot have constructor parameters") 
+                parse_error("objects cannot have constructor parameters")
             end
             params, param_varargs = parse_params()
             if param_varargs then
@@ -1188,6 +1206,23 @@ function parse(tokens, markers)
             end
         end
 
+        -- implements: one or more INTERFACES (SPEC §9: multiple contracts)
+        local implements_list
+        if tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "implements" then
+            if kind == "interface" or kind == "object" then
+                parse_error(kind .. "s cannot implement interfaces")
+            end
+            implements_list = {}
+            repeat
+                i = i + 1
+                if not (tokens[i] and tokens[i].type == "IDENTIFIER") then
+                    parse_error("expected interface name after 'implements'")
+                end
+                implements_list[#implements_list + 1] = ast.Identifier(tokens[i].value)
+                i = i + 1
+            until not (tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == ",")
+        end
+
         -- member loop: only [override] function members until 'end'
         local members = {}
         local seen = {}
@@ -1198,11 +1233,49 @@ function parse(tokens, markers)
         allow_signature = (kind == "interface") or abstract
         while i <= #tokens and not (tokens[i].type == "KEYWORD" and tokens[i].value == "end") do
             local is_override = false
+            local is_default = false
+            if tokens[i].type == "KEYWORD" and tokens[i].value == "default" then
+                i = i + 1
+                is_default = true
+                if kind ~= "interface" then
+                    parse_error("'default' is only allowed inside interfaces")
+                end
+            end
             if tokens[i].type == "KEYWORD" and tokens[i].value == "override" then
                 i = i + 1
                 is_override = true
             end
-            local is_abstract_member = false
+            -- redundant `local` on nested class declarations: warn and continue
+            if tokens[i].type == "KEYWORD" and tokens[i].value == "local"
+                  and tokens[i + 1] and tokens[i + 1].type == "KEYWORD"
+                  and (tokens[i + 1].value == "class" or tokens[i + 1].value == "interface"
+                       or tokens[i + 1].value == "data" or tokens[i + 1].value == "object") then
+                parse_warn("'local' on a " .. tokens[i + 1].value
+                    .. " declaration is redundant — classes are already scope-specific"
+                    .. " (line " .. tostring(tokens[i].line or "?") .. ")")
+                i = i + 1
+            end
+
+            -- class-prefix modifiers for NESTED classes (final/abstract before
+            -- the class keyword) — distinct from member-level abstract
+            local nested_is_final, nested_is_abstract = false, false
+            while tokens[i].type == "KEYWORD"
+                  and (tokens[i].value == "final" or tokens[i].value == "abstract") do
+                local nxt2 = tokens[i + 1]
+                if nxt2 and nxt2.type == "KEYWORD"
+                      and (nxt2.value == "class" or nxt2.value == "interface"
+                           or nxt2.value == "data" or nxt2.value == "object") then
+                    if tokens[i].value == "final" then nested_is_final = true
+                    else nested_is_abstract = true end
+                    i = i + 1
+                else
+                    break                                -- member-level abstract
+                end
+            end
+            if nested_is_final and nested_is_abstract then
+                parse_error("a class cannot be both final and abstract")
+            end
+                        local is_abstract_member = false
             if tokens[i].type == "KEYWORD" and tokens[i].value == "abstract" then
                 i = i + 1
                 is_abstract_member = true
@@ -1210,11 +1283,16 @@ function parse(tokens, markers)
                     parse_error("abstract members are only allowed in abstract classes")
                 end
             end
-            local is_nested_class = false
+local is_nested_class = false
             if tokens[i].type == "KEYWORD"
                and (tokens[i].value == "class" or tokens[i].value == "interface"
                     or tokens[i].value == "data") then
-                local nested = parse_class(tokens[i].value, scope)          -- recursion
+                if (nested_is_final or nested_is_abstract) and tokens[i].value ~= "class" then
+                    parse_error(tokens[i].value .. "s cannot be "
+                        .. (nested_is_final and "final" or "abstract"))
+                end
+                local nested = parse_class(tokens[i].value, nested_is_abstract, scope)
+                if nested_is_final then nested.is_final = true end
                 nested.nested_in = class_name.name                   -- qualification info
                 table.insert(members, nested)
                 is_nested_class = true
@@ -1230,14 +1308,20 @@ function parse(tokens, markers)
                 end
                 fn.overrides = is_override
                 fn.abstract = is_abstract_member
+                fn.is_default = is_default
+                if is_default and (not fn.body or #fn.body.statements == 0) then
+                    parse_error("default function '" .. fn.name.name
+                        .. "' requires a body and a closing 'end'")
+                end
                 if seen[fn.name.name] then
                     parse_error("duplicate method '" .. fn.name.name .. "' in class '"
                         .. class_name.name .. "'")
                 end
                 seen[fn.name.name] = true
-                if kind == "interface" and fn.body and #fn.body.statements > 0 then
+                if kind == "interface" and fn.body and #fn.body.statements > 0
+                      and not fn.is_default then
                     parse_error("interface methods cannot have bodies (in interface '"
-                        .. class_name.name .. "')")
+                        .. class_name.name .. "') — use 'default' for a reference implementation")
                 end
                 if force_signature and fn.body then
                     parse_error("abstract methods cannot have bodies (in class '"
@@ -1258,7 +1342,7 @@ function parse(tokens, markers)
             is_singleton = true
         end
         return at(ast.ClassDeclaration(class_name, params, ast.Block(members),
-                    abstract,is_singleton, kind, extends_name, extends_args), class_line)
+                    abstract,is_singleton, kind, extends_name, extends_args, implements_list), class_line)
     end
 
     function parse_elvis(scope)

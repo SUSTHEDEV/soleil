@@ -5,7 +5,8 @@ end
 
 local S = { kind = "primitive", name = "string" }
 local N = { kind = "primitive", name = "number" }
-local A = { kind = "primitive", name = "any" }
+local A = { kind = "primitive", name = "any" }        -- legal only INSIDE table brackets
+local U = { kind = "primitive", name = "unknown" }    -- dynamic params: everything flows in
 local NIL = { kind = "primitive", name = "nil" }
 local B = { kind = "primitive", name = "boolean" }
 
@@ -15,9 +16,9 @@ local function map(k, v) return { kind = "table", form = "map", key = k, value =
 local function record(fields) return { kind = "record", fields = fields } end
 
 return {
-    ["print"] = fn({ A }, NIL, true),
-    ["select"] = fn({ A }, A, true),   -- tuple-awareness is special-cased in the checker
-    ["type"]  = fn({ A }, S),
+    ["print"] = fn({ U }, NIL, true),
+    ["select"] = fn({ U }, U, true),   -- tuple-awareness is special-cased in the checker
+    ["type"]  = fn({ U }, S),
     ["string"] = record({
         sub    = fn({ S, N, opt(N) }, S),
         len    = fn({ S }, N),
@@ -28,10 +29,10 @@ return {
     ["table"] = record({ insert = fn({ array(A), A }, NIL, true) }),
     ["pairs"]  = fn({ map(A, A) }, A),     -- iterator magic is special-cased, see 4
     ["ipairs"] = fn({ array(A) }, A),
-    ["tostring"] = fn({A}, S),
-    ["tonumber"] = fn({A}, opt(N)),
-    ["error"] = fn({A}, NIL),
-    ["pcall"] = fn({A}, B, true),           -- v1: ret is just the boolean; results are any
-    ["setmetatable"] = fn({A, A}, A),       -- returns its (untyped) table argument
-    ["getmetatable"] = fn({A}, A),
+    ["tostring"] = fn({U}, S),
+    ["tonumber"] = fn({U}, opt(N)),
+    ["error"] = fn({U}, NIL),
+    ["pcall"] = fn({U}, B, true),           -- v1: ret is just the boolean; results are any
+    ["setmetatable"] = fn({map(A, A), map(A, A)}, map(A, A)),   -- returns its (untyped) table argument
+    ["getmetatable"] = fn({U}, map(A, A)),
 }

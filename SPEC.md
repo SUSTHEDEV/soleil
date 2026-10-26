@@ -1,273 +1,388 @@
-# Soleil — Language Specification (working draft)
+# Soleil — Language Specification
 
 A strict, statically-typed dialect of Lua, based on Lua 5.1 semantics.
 The compiler is written in Lua itself (self-hosted, like `kotlinc` is written in Java).
 
+Status: **v1 core complete.** Everything in §§1–10 is implemented and locked behind
+the test suites (`tests/` — parser, checker, integration, corpus, and a 59,198-combo
+recursive battery). §§11–12 are deliberately deferred.
+
 ## 0. Philosophy
 
 - **Strict by description.** There is no implicit escape from the type system.
-- **Unions, not sugar.** There is exactly one composite type mechanism: unions (`A | B`).
-  Nullability (`?`) is sugar for `T | nil`.
-- **Pragmatic, not dogmatic.** Type-system choices are driven by implementation cost in
-  the Teal fork, not by alignment with any one language.
-- Types are **checked, then erased**. The output is plain Lua 5.1 source.
+  Nothing is silently `any`; a function that declares no return types returns `nil`
+  and may not return values; `unknown` must be proven before use.
+- **Unions, not sugar.** There is exactly one composite type mechanism: unions
+  (`A | B`). Nullability (`?`) is sugar for `T | nil`.
+- **Checked, then erased.** Types are validated at compile time and stripped at
+  codegen. The output is plain Lua 5.1 source with zero runtime type machinery.
+- **Loud, not silent.** The checker aborts on the first violation. There is no
+  error recovery and no unchecked mode.
 
 ## 1. Compilation pipeline
 
 ```
-source ── lexer ── token stream ── parser ── AST ── type checker ── codegen ── Lua 5.1
+source ── lexer ── tokens ── parser ── AST ── type checker ── codegen ── Lua 5.1
 ```
 
-Types are erased at codegen. A `--no-check` mode is possible but not a language feature.
+- Two dialects: **soleil** (`.sol`, full grammar) and **lua** (`.lua`, plain Lua —
+  parsed and emitted, never type-checked). The CLI picks the dialect by extension.
+- Errors are tiered and loud: lex/parse errors carry line numbers
+  (`Parse Error at line N: …`); checker errors carry the offending node's line
+  (`type error at line N: …`). All tiers exit non-zero.
+- Nesting is bounded: 100 nested functions at parse; 1500 statement levels in the
+  checker and emitter (loud errors, never a C-stack crash).
 
 ## 2. Type system
 
-### 2.1 Value types (map 1:1 to Lua 5.1 values)
+### 2.1 Value types
 
 | Type | Lua value |
 |---|---|
 | `boolean` | boolean |
 | `number` | number |
 | `string` | string |
-| `function` | function |
+| `nil` | nil (singleton) |
 | `table[V]` / `table[K, V]` / `table[any]` | table |
-| `thread` | thread |
-| `userdata` | userdata |
-| class names | table (nominal) |
+| class / interface / data names | table (nominal) |
 
-### 2.2 Non-value types
+**Numerals.** All Lua 5.1 spellings: decimal, exponent (`1e10`, `3.25e-3`),
+hex (`0xFF`), and trailing-dot (`.5`, `2.`). No 5.4 additions — hex floats
+(`0x1p4`) are not grammar and `inf`/`nan` are **not literals** (they are
+ordinary identifiers in Lua 5.1). Overflowing literals keep their raw text
+end-to-end: `10e500` compiles to `10e500`, never to a printed `inf` — emitting
+`tostring(inf)` would silently reference an undefined global. Programmatic
+non-finite values are emitted as guarded expressions (`(1/0)`, `(-1/0)`,
+`(0/0)`).
 
-- **`void`** — the default return type (≈ Kotlin's `Unit`). It is *not a value*:
-  - may only appear in return position
-  - cannot be stored, passed, assigned, or used in an expression
-  - does not participate in nullability or subtyping (nothing `<: void`, `void <:` nothing)
-- **`Nothing`** — the bottom type (for never-returning functions and all-paths-return
-  analysis).
-  - `Nothing <: T` for all `T`
+### 2.2 `nil` and nullability
 
-### 2.3 Nullability and unions
-
-- **`nil` is a first-class singleton type** (its only value is `nil`):
-  `local x: nil = nil` is legal.
-- **`T?` is sugar for `T | nil`**, kept for ergonomics.
-- Union types `A | B` are the one composite mechanism; nullability is just the special
-  case `T | nil`.
-- Idempotence falls out of union semantics: `(T?)?` = `T?`, `nil?` = `nil`.
-- The `nil` literal has type `nil` directly.
-- `nil` is assignable to `nil` and to any union containing nil (`T | nil`); it is *not*
+- **`nil` is a first-class singleton type.** `local x : nil = nil` is legal.
+- **`T?` is sugar for `T | nil`.** This is the canonical spelling: `x : T | nil`
+  is *not* grammar — write `T?` (or `(A | B)?` is likewise not grammar; a nullable
+  union of two members is written with the `?` on the last member: `A | B?`).
+- `nil` is assignable to `nil` and to any union containing nil. It is never
   assignable to a plain `T`.
-- `void` remains distinct from `nil`: `void` returns *nothing*, `nil` is a value (§5).
+- Idempotence: `(T?)?` = `T?`.
 
-```lua
-local x: number?          = nil     -- ok (nil <: number | nil)
-local y: number           = nil     -- error: nil is not a number
-local n: nil              = nil     -- ok
-local u: string | number  = 1       -- ok
-```
+### 2.3 `any` — table-only, the one trusted channel
 
-### 2.4 `any`
+- **`any` is legal only inside table brackets**: `table[any]`,
+  `table[K, any]`, `table[any, V]`, and union members *within* those brackets
+  (`table[number | any]`). Everywhere else — parameters, returns, locals,
+  class fields, interface mandates, interface member types, unions outside
+  tables — bare `any` is a compile error.
+- The rule exists because `unknown` removed any need for signature-level
+  `any`: everything flows *into* `unknown`, and `tonumber`/`tostring` are the
+  checkpoints out. Dynamic *signatures* are typed `unknown`; dynamic
+  *collections* are typed with `any` in their brackets.
+- Inside its legal home, `any` is assignable in both directions — it is the
+  one trusted channel, and it is opt-in only: nothing produces `any`
+  implicitly.
+- `any` cannot be used as a class name (nominal namespace protection).
+- Standard-library signatures follow the same split: dynamic parameters are
+  `unknown` (`print(v : unknown)`, `tonumber(v : unknown)`), while
+  untyped *containers* stay `table[any]` / `table[any, any]`.
 
-- `any` is the sole escape hatch and is **only legal inside a table**:
-  `table[any]` (or as `K`/`V` of `table[K, V]`).
-- Bare `any` (as a variable/param/return type) is a compile error.
-- `any` is assignable *to* every type in element position; nothing is assignable *from*
-  `any` to a concrete type without an explicit check (see §6).
-- `any` and unions are distinct tools: `any` means "anything at all" (the escape hatch);
-  a union `A | B` means "one of these *known* types".
+### 2.4 `unknown` — untyped variadic data
+
+`unknown` is the type of values whose shape the compiler cannot know. The only
+producer is varargs data: `select(n, ...)` spreads unknowns (and a bare `...`
+flows as unknown into `any` positions).
+
+Boundary rules (strict, deliberately diverging from Kotlin platform types):
+
+| Direction | Rule |
+|---|---|
+| `unknown → unknown` | ok |
+| `unknown → any` | ok |
+| `unknown → T` (any concrete `T`, including `T?`) | **error** |
+| arithmetic / concat on `unknown` | error |
+| `tonumber(u)` | `number?` — checkpoint out |
+| `tostring(u)` | `string` — checkpoint out |
+
+The rule of thumb: **unknown goes nowhere without a checkpoint or `any`.**
 
 ## 3. Tables
 
-Three canonical forms, all explicit:
-
 | Form | Meaning | Iterate | Length |
 |---|---|---|---|
-| `table[V]` | array (integer keys 1..n) | `ipairs` | `#` |
-| `table[K, V]` | map (key `K`, value `V`) | `pairs` | — |
+| `table[V]` | array — number-keyed | `ipairs` | `#` |
+| `table[K, V]` | map | `pairs` | — |
 | `table[any]` | heterogeneous escape hatch | `pairs` | — |
 
 Rules:
 
-1. **Read is always nullable.** `t[k]` has type `V?` even when `V` is non-null —
-   the key may be absent, and Lua answers with `nil`. This is the primary driver of
-   "force null access".
-2. **Write** requires the value to be `V` (or a subtype).
-3. **Empty literals are errors unless annotated**: `local x = {}` → error;
-   `local x: table[string] = {}` → ok.
-4. **Inline entry annotations** (`{a: string = "a"}`) are never canonical:
-   - all entries same type → **warning**: "boilerplate, use `table[V]`"
-   - entries of differing types → **infer a union**: `{a: string = "a", b: number = 1}`
-     infers `table[string, string | number]`
-   - they never produce a new *nominal* type — a union is just an aggregate.
+1. **Read is always nullable.** `t[k]` has type `V?` even when `V` is non-null.
+   Discharge with a nil-guard, `?:`, or `!!` (§7).
+2. **Literals are element-checked.** A positional literal infers the *union* of its
+   elements: `{Circle(1), Square(1)}` types as `table[number, Circle | Square]`,
+   so it assigns cleanly to `table[Circle | Square]` and rejects
+   `{1, "x"}` against `table[number]`.
+3. `{a = 1}` is a named pair. `{a, b, c}` is **positional** — Lua semantics; there
+   is no `{name}` shorthand.
+4. Flow narrowing applies to element reads: `xs[1]` is `V?`, so `xs[1] + 1` needs
+   a guard (`if s ~= nil`, `xs[1] ?: 0`, or `xs[1]!!`).
+5. Constructors and other literals are not callable/indexable (Lua's `prefixexp`
+   rule): `({1,2})[1]` is required; `{1,2}[1]` is a syntax error.
+
+## 4. Functions
 
 ```lua
-local x: table[string]       = {"a", "b"}
-local m: table[string, number] = { alice = 100 }
-local h: table[any]          = { 1, "two", true }
+local function add(a : number, b : number) : number
+    return a + b
+end
+
+local function div(a : number, b : number) : number, string?   -- multi-returns
+    if b == 0 then return nil, "div by zero" end
+    return a / b, nil
+end
+
+local function va(head : number, ...) : number                 -- varargs last
+    return head + select("#", ...)
+end
 ```
 
-## 4. Classes (OOP)
+- **Implicit nil.** A function that declares no return types returns `nil` and
+  *may not return values*: `return 42` in a rets-less function is an error
+  ("add return types or return nothing"). This is the runtime-honest encoding —
+  Lua's no-return, bare `return`, and `return nil` are indistinguishable at runtime.
+- **Multi-returns are declared comma-separated** and checked per position.
+  Call results spread: `local q, m = div(1, 2)`.
+- **Parenthesization truncates.** `(f())` yields exactly one value:
+  `local a, b = (f())` binds `b` as nil. The parens are semantic (an `AST.Paren`
+  node), never discarded.
+- **`local function` may recurse** — the name is pre-declared (`local f; f = …`).
+- **Scoping is lexical and block-scoped**, as in Lua.
+- Factories returning body-local classes cannot name the return type (lexical
+  scoping); declare the class outside the function, or return through an
+  interface / `: any`.
 
-Nominal types. Subtyping is inheritance-based, not structural. Single inheritance via
-`extends`; overriding an inherited method must be declared with `override`.
+## 5. Strict operators
+
+- **Concat `..` requires strings.** Numbers do not implicitly coerce:
+  `tostring(42) .. "!"` is the spelled-out form. `tonumber`/`tostring` are the
+  conversion checkpoints for the whole language.
+- Arithmetic requires numbers on both sides. Comparison operators require
+  like-typed operands.
+- Call sugar: `f{...}` ≡ `f({...})`, `f"str"` ≡ `f("str")` — receivers must be
+  callable (see §3.5).
+
+## 6. Classes (OOP)
+
+Nominal types; single inheritance via `extends`; multiple contracts via
+`implements` (§8).
 
 ```lua
-class Player(name: string?, id: number)   -- constructor params = fields
-  function say(self: Player, something: string)
-    print(self.name, something)
-  end
+class Player(name : string?, id : number)
+    function say(self : Player, something : string)
+        print(self.name, something)
+    end
 end
 
-class Admin(role: string) extends Player("", 0)
-  override function say(self: Admin, something: string)
-    print(self.role .. ": " .. something)
-  end
+class Admin(role : string) extends Player("", 0)
+    override function say(self : Admin, something : string)
+        print(self.role .. ": " .. something)
+    end
 end
+
+local p = Player("bob", 42)     -- inferred exactly: p : Player
+p:say("hi")                     -- ':' injects self; declarations keep it explicit
 ```
 
 Rules:
 
-1. **Constructor params live in the class header and are auto-promoted to fields.**
-   Required params may be declared non-null (provably initialized); optional params
-   are declared nullable.
-2. **`self` is explicit and covariant** — an ordinary first parameter. In a base class
-   it is typed `self: Class`; in an override it narrows to the subclass (`self: Admin`
-   overriding `self: Player`), granting access to subclass fields. `self` is the one
-   parameter that narrows in an override — every other parameter must match or widen.
-3. **Undeclared field access is an error** (`p.z` where `z` is not a field).
-4. Fields declared non-null are trusted as non-null after construction.
-5. Access to a class field of declared type `T` yields `T` (not `T?`) — trust the
-   declaration (contrast with table reads in §3).
-6. **`extends`** — single inheritance; a subclass may add fields/methods and inherit
-   the parent's. Super-constructor arguments go in the header (`extends Player(...)`).
-7. **`override`** — required to override an inherited method; a compile error if the
-   named method does not exist on an ancestor, or its signature is incompatible.
-   The return type may be narrowed (covariant return: `speak(): Animal` may be
-   overridden by `speak(): Dog`). `override` is a pure check with zero runtime cost
-   (see §8).
-8. **`super`** — inside an override, `super.m(self, ...)` calls the parent's
-   implementation. Resolved at compile time to a direct flat call to the ancestor's
-   function (`Player.say(self, ...)`), costing no more than an ordinary call.
-9. **Instantiation** — a class is callable: `Player("bob", 42)`. AOT-compiled to a
-   direct call to the constructor (no `__call` metatable).
-10. **Call sites use `:`** — `p:say("hi")` auto-injects the receiver as `self`
-    (`p.say(p, "hi")`). Declarations keep `self` explicit (rule 2).
+1. **Constructor params live in the header and are auto-promoted to fields.**
+   Declare them nullable unless proven initialized. Fields of declared type `T`
+   read as `T` (trusted — contrast with table reads, §3.1).
+2. **`self` is explicit and covariant** — the one parameter that may *narrow* in
+   an override (`self: Admin` overriding `self: Player`). Every other parameter
+   must match or widen; returns may narrow; counts must match. `override` is
+   required to shadow an ancestor method and is a compile error when the method
+   does not exist or the signature is incompatible.
+3. **`super.m(self, ...)`** — args map the declared params 1:1 (self is explicit).
+   Resolved statically to the nearest ancestor providing `m`; compiles to a flat
+   call.
+4. **Undeclared field access is an error.** Field reads narrow under guards
+   (§7): `type(self.v) == "number"` and `self.v ~= nil` both refine `self.v`.
+5. **`extends` takes exactly one class**, with super-constructor arguments in the
+   header (`extends Player("", 0)`). Chained constructors run base-first.
+   Extending an interface is an error — interfaces are `implemented`.
+6. **Kinds**: `class` (standard), **`data`** (params required, plain aggregate),
+   **`object`** (singleton — the name *is* the one instance; top-level only,
+   never abstract, no params), **`abstract`** (prefix on classes: not
+   instantiable; abstract members are body-less and concrete subclasses must
+   implement them), **`final`** (prefix on classes: cannot be extended — sealed).
+   `final abstract` is rejected as contradictory.
+7. **`final` and dispatch**: a method call on a final-typed receiver always
+   compiles to a direct flat call — no subclass can exist, so the method is
+   monomorphic by construction, even when unrelated classes share the name.
+7. **Classes nest and localize freely.** A class may be declared inside a
+   function, a method, or another class; the compiler assigns each a unique
+   flat runtime name, so same-named local classes coexist.
 
-```lua
-local p: Player = Player("bob", 42)
-p.name                                -- string? (declared nullable)
-p.id                                  -- number  (declared non-null)
-p.z                                   -- error: no field z
-local a: Admin = Admin("admin")
-local x: Player = a                   -- ok: Admin <: Player
-x:say("hi")                           -- dynamic: dispatches to Admin.say
-```
+## 7. Null safety
 
-## 5. Functions and return types
+Every nullable value must be discharged through one of:
 
-The default return type is **`void`**: a function that promises nothing.
-
-| Declared | `return v` | `return nil` | bare `return` | fall off end |
-|---|---|---|---|---|
-| `(none)` / `void` | error | error | ok (early exit) | ok |
-| `: T` | ok iff `v <: T` | error | error | error (all paths must return) |
-| `: T?` | ok iff `v <: T?` | ok | error (write `return nil`) | error (write explicit `return`) |
-
-- **Returns are explicit.** Bare `return` is void-only. Every path of a value-returning
-  function (`: T` or `: T?`) must end in an explicit `return v` / `return nil`.
-- **`return nil`** is legal iff the return type contains nil, i.e. is `T?` (= `T | nil`).
-- **bare `return`** means "return nothing" and is legal only in `void` functions.
-- **All-paths-return** analysis is required for non-void functions. This shares
-  machinery with null narrowing (§6).
-- **Scoping is function-scoped.** A `local` declared anywhere in a function is visible
-  for the whole function (one scope per function — this deliberately diverges from
-  Lua's block-scoped `local`).
-
-## 6. Null operators
-
-Four notations; every nullable value must be discharged through one of these (or an
-explicit `if x ~= nil` narrow):
-
-| Notation | Meaning | In → out |
+| Form | Meaning | In → out |
 |---|---|---|
 | `T?` | nullable type | declaration |
-| `x?.f` | safe access | receiver `C?` → field `T` becomes `T?` |
-| `x ?: d` | Elvis / default | `x: T?`, `d: U` → `T | U` (reduces to `T` when `U <: T`) |
-| `x!!` | not-null assertion | `x: T?` → `T` (throws if nil) |
+| `x?.f` / `x?.m(args)` | safe access | receiver `C?` → result wrapped `?` |
+| `x ?: d` | elvis / default | `x : T?`, `d : U` → union; **substitutes on nil only** (`false` passes through) |
+| `x!!` | not-null assertion | `x : T?` → `T`; runtime `error("nil assertion failed")` if nil |
+| `if x ~= nil` | flow narrowing | see below |
 
-Semantics:
+Precedence: `?.` / `!!` bind tightest (postfix); `?:` sits between `and` and the
+comparison level, and is right-associative.
 
-- **`?.`** short-circuits **only on its receiver** being nil. The "entry was removed"
-  case is orthogonal — it is already covered by table-read nullability (§3). Extends
-  to indexing `t?[k]` and method calls `a?.b()`.
-- **`?:`** evaluates `d` only when `x` is nil (short-circuit). Result type is `T | U`
-  where `x: T?` and `d: U` (non-nil `x` → `T`, else `U`); when `U <: T` this reduces to
-  `T`. `?:` may therefore create a union.
-- **`!!`** compiles to an explicit assertion with a message naming the expression,
-  not a raw Lua "attempt to index nil":
+**Flow narrowing** (locals and dotted fields, both branch directions):
+
+- `if x ~= nil` narrows `x` in the *then* block; `if x == nil` narrows in the
+  *else* block. The complement branch types `x` as `nil` (any use fails loudly).
+- `if type(x) == "number"` refines a union `x` to its `number` member in the
+  then-branch, and to the complement in the else-branch. Works on locals and
+  dotted fields (`type(self.v) == …`).
+- **An assignment to the narrowed name inside a branch cancels that branch's
+  shadow** — the stale refinement cannot lie about a reassigned value.
+
+## 8. Interfaces
+
+Java's model: **multiple contracts, single inheritance.** Interfaces erase
+entirely at runtime — except default methods (§8.3).
 
 ```lua
-local name: string? = player.name
-local len = name?.len          -- number?  (nil if name nil)
-local len = #(name ?: "")      -- number   (default)
-local len = #name!!            -- number   (explicit error if name nil)
+interface Named(name : string)
+    function label(self : Named) : string
+end
+
+interface Greeter
+    default function greet(self : Greeter) : string
+        return "hello"
+    end
+end
+
+class Dog(name : string, tag : string?) extends Animal(name) implements Named, Greeter
+    function label(self : Dog) : string return self.name end
+    -- greet is inherited from Greeter's default
+end
 ```
 
-Precedence: `?.` / `!!` bind tighter than `?:`, which binds tighter than `and`/`or`.
+### 8.1 `implements`
 
-## 7. Subtyping (`is_subtype`)
+- `implements A, B` — one or more interfaces, comma-separated. Only `class` and
+  `data` may implement; interfaces and objects may not.
+- Satisfaction is checked at the declaration: every interface field and method
+  must be provided (methods matched on parameter count and return compatibility),
+  **except default methods**, which satisfy themselves (§8.3).
 
-1. `T <: T` (reflexive)
-2. **Union subtyping** — `T <: A | B` iff `T <: A` *or* `T <: B`; `A | B <: T` iff
-   `A <: T` *and* `B <: T`. This subsumes nullability: `T <: T | nil` (i.e. `T <: T?`)
-   falls out as union membership, and `nil <: T?` via `nil <: nil`.
-3. `Sub <: Super` (nominal, transitive through the inheritance chain)
-4. **Table variance is invariant**, with a single carve-out: `any` is the top of the
-   element (value) position. `table[A] <: table[B]` iff `A == B` or `B == any`; the same
-   holds for the value position of `table[K, V]` (keys are always invariant). No other
-   element variance — in particular `table[string]` is **not** `<: table[string?]`.
-5. `Nothing <: T` (bottom)
-6. `void` is outside the value hierarchy: nothing `<: void`, `void <:` nothing
+### 8.2 Constructor mandates (name-based)
 
-## 8. Codegen
+An interface's constructor parameters are **type mandates**, not runtime values:
 
-The compiler is **ahead-of-time and explicit**: it resolves as much as possible at
-compile time and emits **flat, structured Lua** so the runtime penalty is minimal.
+```lua
+interface A(x : string) end
+interface B(x : number) end
 
-- Target **Lua 5.1 / LuaJIT** source.
-- Types are erased entirely; the checker guarantees well-typedness at compile time.
-- **Devirtualization (flat dispatch).** A method call compiles to a *direct* flat call
-  (`Player.say(p, ...)`) whenever the target can be proven statically. Dynamic dispatch
-  is used *only* for methods that are overridden anywhere — and the `override` marker
-  tells the compiler exactly which methods those are:
-  - never overridden → direct call, no indirection
-  - overridden → one lookup in a flat dispatch table (vtable)
-- `x!!` → explicit assert (named).
-- `?.` / `?:` → explicit `if x == nil then ... else ...` desugaring preserving
-  short-circuit semantics.
-- Classes → flat tables of functions with explicit `self`; inheritance carried by a
-  dispatch table, **not** a metatable `__index` chain (no metatable traversal at call time).
+class C(x : string | number) implements A, B end          -- ok
+class C(x : string | number?) implements A, B end         -- ok (nullable union)
+class C(x : string) implements A, B end                   -- error: x must accept number
+```
 
-Consequence: methods are not monkey-patchable at runtime — dispatch is fixed at compile
-time. That is intentional under the "explicit" philosophy.
+- Mandates match **by parameter name**: the class must have a parameter of that
+  name whose type *accepts* the mandated type (each mandate flows in).
+- Positions are irrelevant; extra class parameters are fine; a missing named
+  parameter is an error naming the mandating interface.
 
-## 9. Planned (deferred)
+### 8.3 Default methods
 
-Reserved but not part of the first self-hosted core. The syntax is anticipated so the
-grammar isn't painted into a corner, but none of these block the path to a working
-compiler.
+- `default function m(...) ... end` inside an interface carries a **reference
+  implementation**. The body is required (a body-less default is an error), and
+  ordinary interface members may *not* have bodies.
+- A default satisfies its own contract: implementing classes need not override it.
+  A class may still provide its own — the override wins.
+- Runtime: defaults compile to flat `__Interface_m` functions; an implementing
+  class's constructor installs the default on `self` only when no ancestor
+  defines the method.
 
-- **`abstract`** — abstract classes (cannot be instantiated) and abstract methods
-  (declared without a body; concrete subclasses must implement them). Compile-time-only.
-- **`interface` / `implements`** — multiple contracts, single inheritance (Java's model).
-  Interfaces erase entirely at runtime; `implements` adds a *bounded structural
-  conformance check* (does the class's method set cover the interface?) alongside the
-  nominal `Sub <: Super` rule. This is the one feature that would reintroduce a second,
-  structural subtyping pathway — defer deliberately.
-- **`final`** — a method/class that cannot be overridden/extended. Enables maximum
-  devirtualization (§8): a `final` method is *always* a direct, flat call.
+### 8.4 Interface-typed values
 
-## 10. Bootstrap
+`local g : Greeter = Dog(...)` type-checks via **bounded structural conformance**:
+the class must cover every interface member (with the default-method rule). This
+is the one structural pathway; classes themselves remain nominal. Method calls
+through interface-typed receivers dispatch dynamically to the instance's methods.
 
-Once the compiler type-checks and emits Lua, run it on its own source and require the
-output to pass the same test suite (self-hosting). Drive development with a test harness
-comparing `parse(src) == expected_ast` and `check(src) -> expected_type`.
+## 9. `unknown`, revisited — what produces what
+
+| Expression | Type |
+|---|---|
+| annotated function, declared rets | exactly those types |
+| rets-less function call | `nil` |
+| `select("#", ...)` | `number` |
+| `select(n, ...)` | `n−1` unknowns |
+| `tonumber(x)` | `number?` |
+| `tostring(x)` | `string` |
+| `type(x)` | `string` |
+| `pair`/`ipair` iteration variables | the container's declared `V` / index `number` |
+
+Nothing else produces `unknown` or `any` implicitly. `any` is written by the
+programmer or it does not exist.
+
+## 10. Codegen
+
+- Target: **Lua 5.1** source. Types are erased entirely.
+- **Classes compile to flat structures**: `__ClassName_method(self, ...)` functions;
+  the constructor `__ClassName_new(params)` builds a table, runs the base
+  constructor first (if `extends`), sets fields, then installs methods — **base
+  methods copied first, derived last, so overrides win**; interface defaults
+  install only where no ancestor defines the method. No metatable `__index`
+  traversal at call time.
+- **Devirtualization**: a method call compiles to a direct flat call when the
+  checker can prove the method is monomorphic across the program (census-gated).
+  Polymorphic call sites — overridden methods and interface-typed receivers —
+  dispatch dynamically through the instance-carried method. Consequence: methods
+  are not monkey-patchable at runtime. Intentional.
+- **Null operators**: `!!` → named runtime assertion; `?.` / `?:` → nil-checked
+  IIFEs (`and`/`or` desugaring is *unsound* on `false` and never used).
+- Literals and constructors are parenthesized whenever they occupy a
+  call/index receiver position (`prefixexp` rule).
+- Function-local and nested classes receive unique flat names; sibling
+  same-named local classes coexist.
+
+## 11. Tooling
+
+```
+lua main.lua <input.sol | input.lua> [options]
+    -o, --output <file>   write generated Lua (default: stdout)
+    --run                 compile and execute in-process
+    -v, --verbose         dump tokens and AST
+    -h, --help
+```
+
+- Dialect by extension: `.sol` → soleil (checked), `.lua` → lua (parse+emit only).
+- Imports resolve relative to the compiler script, not the caller's cwd.
+- Files may carry `#!INCOMPLETE` markers (shebang or `--#!INCOMPLETE` inline):
+  the checker **refuses** to fully check a marked file unless lenient mode is
+  requested via the API (`options.allow_incomplete`).
+
+Test suites (`tests/`): parser (128), checker (192), whole-program integration
+(19), corpus parse→emit→load over the Lua 5.1 test suite (24), AST **round-trip
+emission integrity** (39 files/constructs: emit → re-parse → normalized
+equivalence — Lua-mode output must be AST-isomorphic; soleil constructs are
+verified lowerings), and a recursive-combination battery (59,198 combos:
+nesting × field typing × payload shapes, plus expect-error adversarial
+contracts).
+
+## 12. Planned (deferred)
+
+- **`final` methods** — member-level sealing (class-level `final` ships today);
+  enables maximal devirtualization.
+- **Hex-float literals** — deliberately absent (Lua 5.1 has none); revisit only
+  with a 5.4 target.
+- **Soleil.toml** — build configuration (`strict_null`, `allow_incomplete`,
+  `optimize`); the loader exists, the CLI wiring does not.
+- **Generics** — `table[T]` is today's only parameterized shape.
+- **Ecosystem**: `lua2sol` (untyped Lua → annotated Soleil migration tool),
+  `headersgen` (C headers → `.hds` stdlib files), a tree-walking interpreter for
+  `-i`, REPL/LSP, LuaJIT-targeted emission.
+- **Self-hosting** (SPEC §10 of the original draft): compile Soleil with Soleil.

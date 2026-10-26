@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>
+  (function () {
+    var stored = null;
+    try { stored = localStorage.getItem("soleil-theme"); } catch (e) {}
+    var theme = stored === "dark" || stored === "light"
+      ? stored
+      : (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = theme;
+  })();
+</script>
+<title>Functions — Soleil</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script type="module">
+  import {styles as typescaleStyles} from 'https://esm.sh/@material/web@2.5.0/typography/md-typescale-styles.js';
+  document.adoptedStyleSheets.push(typescaleStyles.styleSheet);
+  import 'https://esm.sh/@material/web@2.5.0/all.js';
+</script>
+</head>
+<body>
+
+<header class="app-bar">
+  <md-icon-button aria-label="Menu"><md-icon>menu</md-icon></md-icon-button>
+  <a class="brand" href="index.html">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="11" cy="12.5" r="10" fill="none" stroke="currentColor" stroke-width="1" opacity=".4"/>
+      <circle cx="11" cy="12.5" r="7" fill="currentColor"/>
+      <circle cx="18" cy="5.5" r="2.2" fill="currentColor"/>
+      <circle cx="14.4" cy="3.1" r="1.1" fill="currentColor"/>
+    </svg>
+    <span class="title-large">Soleil</span>
+  </a>
+  <md-filled-text-field
+    class="search"
+    type="search"
+    placeholder="Search the Soleil docs..."
+    aria-label="Search the Soleil docs">
+    <md-icon slot="leading-icon">search</md-icon>
+  </md-filled-text-field>
+  <md-icon-button id="theme-toggle" aria-label="Toggle theme"><md-icon id="theme-icon">dark_mode</md-icon></md-icon-button>
+</header>
+
+<div class="layout">
+
+  <nav class="nav" aria-label="Docs navigation">
+    <span class="nav-heading label-large">LANGUAGE</span>
+    <md-list-item type="link" href="index.html">
+      <md-icon slot="start">home</md-icon>
+      <span slot="headline">Overview</span>
+    </md-list-item>
+    <md-list-item type="link" href="syntax.html">
+      <md-icon slot="start">rocket_launch</md-icon>
+      <span slot="headline">Getting Started</span>
+    </md-list-item>
+    <md-list-item type="link" href="index.html#builds">
+      <md-icon slot="start">layers</md-icon>
+      <span slot="headline">Compiler Builds</span>
+    </md-list-item>
+    <md-list-item type="link" href="tooling.html">
+      <md-icon slot="start">terminal</md-icon>
+      <span slot="headline">Tooling</span>
+    </md-list-item>
+    <span class="nav-heading label-large">DOCUMENTATION</span>
+    <span class="nav-heading label-medium" style="padding:4px 16px;opacity:.7">CORE</span>
+    <md-list-item type="link" href="syntax.html">
+      <md-icon slot="start">code</md-icon>
+      <span slot="headline">Syntax</span>
+    </md-list-item>
+    <md-list-item type="link" href="types.html">
+      <md-icon slot="start">data_object</md-icon>
+      <span slot="headline">Type System</span>
+    </md-list-item>
+    <md-list-item type="link" href="null-operators.html">
+      <md-icon slot="start">question_mark</md-icon>
+      <span slot="headline">Null Operators</span>
+    </md-list-item>
+    <md-list-item type="link" href="functions.html" class="active">
+      <md-icon slot="start">functions</md-icon>
+      <span slot="headline">Functions</span>
+    </md-list-item>
+    <md-list-item type="link" href="modules.html">
+      <md-icon slot="start">package</md-icon>
+      <span slot="headline">Modules &amp; Scope</span>
+    </md-list-item>
+    <md-list-item type="link" href="classes.html">
+      <md-icon slot="start">workspaces</md-icon>
+      <span slot="headline">Classes &amp; Objects</span>
+    </md-list-item>
+    <span class="nav-heading label-medium" style="padding:4px 16px;opacity:.7">ADVANCED</span>
+    <md-list-item type="link" href="errors.html">
+      <md-icon slot="start">error</md-icon>
+      <span slot="headline">Error Handling</span>
+    </md-list-item>
+    <md-list-item type="link" href="metatables.html">
+      <md-icon slot="start">sync</md-icon>
+      <span slot="headline">Metatables &amp; Coroutines</span>
+    </md-list-item>
+    <span class="nav-heading label-large">RESOURCES</span>
+    <md-list-item type="button">
+      <md-icon slot="start">science</md-icon>
+      <span slot="headline">Examples</span>
+    </md-list-item>
+    <md-list-item type="button">
+      <md-icon slot="start">history</md-icon>
+      <span slot="headline">Changelog</span>
+    </md-list-item>
+  </nav>
+
+  <main class="content doc">
+    <header class="page-header">
+      <span class="kicker label-large">DOCUMENTATION — CORE</span>
+      <h1>Functions</h1>
+      <p class="body-large">Functions are values in Soleil, just like Lua — with checked signatures and explicit returns.</p>
+    </header>
+
+    <section id="declaring">
+      <h2>Declaring functions</h2>
+      <p class="body-large">Return types are annotated after the argument list, comma-separated for multiples. Implicit nil is the rule: a function that declares no return types returns nil and <em>may not return values</em> — <code>return 42</code> in a rets-less function is an error ("add return types or return nothing"). A value-returning function must return on every path.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">declare.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">local</span> <span class="tok-kw">function</span> <span class="tok-fn">add</span>(a : number, b : number) : number
+    <span class="tok-kw">return</span> a + b
+<span class="tok-kw">end</span>
+
+<span class="tok-kw">function</span> <span class="tok-fn">log</span>(msg : string)          <span class="tok-com">-- rets-less: returns nil</span>
+    <span class="tok-fn">print</span>(msg)
+    <span class="tok-com">-- return 42                    -- error: add return types</span>
+<span class="tok-kw">end</span></code></pre>
+      </div>
+    </section>
+
+    <section id="multiple">
+      <h2>Multiple returns</h2>
+      <p class="body-large">Return types are listed comma-separated — no parentheses. Callers unpack them as in Lua, and a function may tail-return another call's results, checked per position. Parenthesization truncates: <code>(f())</code> yields exactly one value.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">multi.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">local</span> <span class="tok-kw">function</span> <span class="tok-fn">head_and_count</span>(xs : table[number]) : number?, number
+    <span class="tok-kw">return</span> xs[<span class="tok-num">1</span>], #xs
+<span class="tok-kw">end</span>
+
+<span class="tok-kw">local</span> first, total = <span class="tok-fn">head_and_count</span>({ <span class="tok-num">7</span>, <span class="tok-num">8</span>, <span class="tok-num">9</span> })
+<span class="tok-kw">local</span> only = (<span class="tok-fn">head_and_count</span>({ <span class="tok-num">7</span>, <span class="tok-num">8</span>, <span class="tok-num">9</span> }))  <span class="tok-com">-- truncates to one</span></code></pre>
+      </div>
+    </section>
+
+    <section id="varargs">
+      <h2>Varargs</h2>
+      <p class="body-large">The ellipsis must come last. Use <code>select("#", ...)</code> for the count — it is typed number — and <code>select(n, ...)</code> to spread unknowns. Using <code>...</code> outside a varargs function is a compile error.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">varargs.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">local</span> <span class="tok-kw">function</span> <span class="tok-fn">sum</span>(...)
+    <span class="tok-kw">local</span> total = <span class="tok-num">0</span>
+    <span class="tok-kw">for</span> _, value <span class="tok-kw">in</span> <span class="tok-fn">ipairs</span>({ ... }) <span class="tok-kw">do</span>
+        total = total + value
+    <span class="tok-kw">end</span>
+    <span class="tok-kw">return</span> total
+<span class="tok-kw">end</span>
+
+<span class="tok-fn">print</span>(<span class="tok-fn">sum</span>(<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>)) <span class="tok-com">-- 6</span></code></pre>
+      </div>
+    </section>
+
+    <section id="closures">
+      <h2>Closures, recursion, and local classes</h2>
+      <p class="body-large">Anonymous functions are fully checked, including at the call site — argument count and types are verified. <code>local function</code> may recurse: the name is pre-declared. Classes may be declared inside functions too, but a factory returning a body-local class cannot name the return type — declare shared classes outside the function or return through an interface.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">closures.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">local</span> scale = <span class="tok-fn">function</span>(factor : number)
+    <span class="tok-kw">return</span> <span class="tok-fn">function</span>(value : number) : number
+        <span class="tok-kw">return</span> value * factor
+    <span class="tok-kw">end</span>
+<span class="tok-kw">end</span>
+
+<span class="tok-kw">local</span> n : number = <span class="tok-fn">scale</span>(<span class="tok-num">2</span>)(<span class="tok-num">21</span>) <span class="tok-com">-- 42</span></code></pre>
+      </div>
+    </section>
+
+    <section id="stdlib">
+      <h2>Checked standard library</h2>
+      <p class="body-large">The standard library follows the any/unknown split: dynamic parameters are unknown — <code>print(v : unknown)</code>, <code>tonumber(v : unknown)</code> — while untyped containers stay <code>table[any]</code>. <code>tonumber</code> returns <code>number?</code> because parsing can fail; tonumber and tostring are the conversion checkpoints of the whole language.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">stdlib.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">local</span> s : string = <span class="tok-str">"abc"</span>
+<span class="tok-kw">local</span> n : number = s:<span class="tok-fn">len</span>()
+
+<span class="tok-kw">local</span> parsed : number? = <span class="tok-fn">tonumber</span>(<span class="tok-str">"42"</span>)
+<span class="tok-kw">local</span> safe : number = parsed ?: <span class="tok-num">0</span></code></pre>
+      </div>
+    </section>
+
+    <nav class="pn" aria-label="Pagination">
+      <a href="null-operators.html"><span class="dir label-medium">Previous</span><span class="name title-medium">Null Operators</span></a>      <a class="next" href="modules.html"><span class="dir label-medium">Up next</span><span class="name title-medium">Modules &amp; Scope</span></a>
+    </nav>
+  </main>
+
+  <aside class="toc" aria-label="On this page">
+    <span class="label-large" style="color:var(--on-surface-variant)">ON THIS PAGE</span>
+    <a href="#declaring">Declaring functions</a>
+    <a href="#multiple">Multiple returns</a>
+    <a href="#varargs">Varargs</a>
+    <a href="#closures">Closures, recursion, and local classes</a>
+    <a href="#stdlib">Checked standard library</a>
+  </aside>
+
+</div>
+
+<footer class="footer">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" aria-hidden="true" style="width:24px;height:24px">
+      <circle cx="11" cy="12.5" r="10" fill="none" stroke="currentColor" stroke-width="1" opacity=".4"/>
+      <circle cx="11" cy="12.5" r="7" fill="currentColor"/>
+      <circle cx="18" cy="5.5" r="2.2" fill="currentColor"/>
+      <circle cx="14.4" cy="3.1" r="1.1" fill="currentColor"/>
+    </svg>
+    <span class="title-medium">Soleil</span>
+  </div>
+  <span class="body-small">© 2026 The Soleil Project. A typed, object-oriented dialect of Lua.</span>
+</footer>
+
+<md-fab variant="primary" aria-label="Back to top"><md-icon slot="icon">keyboard_arrow_up</md-icon></md-fab>
+
+<script src="site.js" defer></script>
+</body>
+</html>

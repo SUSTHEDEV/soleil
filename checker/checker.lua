@@ -46,8 +46,8 @@ local function find_member(ct, table_name, member_name)
     local c = ct
     while c do
         if c.class_type ~= "interface" then
-            local m = c[table_name][member_name]
-            if m then return m end
+            local mem = c[table_name][member_name]
+            if mem then return mem end
         end
         c = c.base_class
     end
@@ -63,6 +63,25 @@ local function lookup(scope, name)
     while s do
         local t = s.vars[name]
         if t then return t end
+        s = s.parent
+    end
+    return nil
+end
+
+-- dotted-lvalue canonical key ("self.v") — for field-level narrowing shadows
+local function lvalue_key(node)
+    if node.type == "Identifier" then return node.name end
+    if node.type == "TableIndex" and node.via_dot then
+        local base = lvalue_key(node.table)
+        if base then return base .. "." .. node.index.name end
+    end
+    return nil
+end
+
+local function lookup_field_narrow(scope, key)
+    local s = scope
+    while s do
+        if s.field_narrows and s.field_narrows[key] then return s.field_narrows[key] end
         s = s.parent
     end
     return nil
@@ -139,7 +158,10 @@ local function class(name, class_type, abstract, fields, methods, base_class) re
     base_class = base_class -- the base class's table that this class extends
 } end
 
-local options = require("config.config")
+-- Soleil.toml wiring is deferred; until it returns, defaults hold the line.
+-- (options.allow_incomplete = true is the lenient-INCOMPLETE mode, settable
+-- via the API once config lands)
+local options = { allow_incomplete = false }
 
 local describe  -- forward
 describe = function(t)
@@ -196,13 +218,16 @@ end
 local class_registry = {}
 local qname_taken = {}       -- unique flat names for emitted classes
 
-local function from_ast(node, scope)
+local function from_ast(node, scope, any_ok)
     if not node then return T_ANY end
     if node.type == "Type" then
         local name = node.type_name
         local base
         if name == "number" or name == "string" or name == "boolean"
            or name == "nil" or name == "any" or name == "unknown" then
+            if name == "any" and not any_ok then
+                error("any is only legal inside table types — use unknown for dynamic data")
+            end
             base = prim(name)
         else
             local ct = lookup(scope, name)        -- classes resolve through scopes now
@@ -216,13 +241,14 @@ local function from_ast(node, scope)
         end
         return base
     elseif node.type == "TableType" then
+        -- the brackets are any's one legal home
         return { kind = "table", form = node.form,
-                 key = from_ast(node.key, scope),
-                 value = from_ast(node.value, scope) }
+                 key = from_ast(node.key, scope, true),
+                 value = from_ast(node.value, scope, true) }
     elseif node.type == "UnionType" then
         local members = {}
         for _, m in ipairs(node.types) do
-            members[#members + 1] = from_ast(m, scope)
+            members[#members + 1] = from_ast(m, scope, any_ok)
         end
         return union(members)
     end
@@ -274,9 +300,28 @@ compatible = function(src, dst)
     end
     if src.kind == "record" or dst.kind == "record" then return src == dst end
     if src.kind == "class" and dst.kind == "class" then
+        if dst.class_type == "interface" and src.class_type ~= "interface" then
+            -- SPEC §9: bounded structural conformance — the source must cover
+            -- every interface member (this is how 'implements' types flow)
+            for fname, ftype in pairs(dst.fields) do
+                local provided = find_member(src, "fields", fname)
+                if not provided or not compatible(ftype, provided) then return false end
+            end
+            for mname, im in pairs(dst.methods) do
+                local impl = find_member(src, "methods", mname)
+                if not impl and im.is_default then
+                    -- default methods satisfy themselves
+                elseif not impl or #impl.params ~= #im.params then
+                    return false
+                elseif impl.ret and im.ret and not compatible(impl.ret, im.ret) then
+                    return false
+                end
+            end
+            return true
+        end
         local c = src
         while c do
-            if c.name == dst.name then return true end
+            if c.name == dst.name or (dst.qname and c.qname == dst.qname) then return true end
             c = c.base_class
         end
         return false
@@ -299,7 +344,8 @@ local function check_fn_body(node, fn_type, parent_scope)
     for _, rt in ipairs(node.return_types or {}) do
         fn_type.rets[#fn_type.rets + 1] = from_ast(rt, parent_scope)
     end
-    fn_type.ret = fn_type.rets[1] or T_ANY    -- head: existing consumers keep working
+    -- no declared returns = promises nothing = implicit nil (honest typing)
+    fn_type.ret = fn_type.rets[1] or T_NIL
     local fn_scope = new_scope(parent_scope, false, fn_type.rets)
     for _, p in ipairs(node.parameters) do
         if p.type == "Param" then
@@ -432,6 +478,57 @@ infer_expr = function(node, scope, allow_type)
     end
 
     if kind == "TableIndex" then
+        -- Qualified nested-class references on a TYPE receiver:
+        --   Outer.Seal            -> the nested class type (ctor-able)
+        --   Outer.Seal.v          -> a member resolved statically (flat-callable)
+        -- The receiver is a TYPE (not a value), so only these are reachable.
+        if node.via_dot and lvalue_key(node) then
+            local root_name = lvalue_key(node):match("^[^.]+")   -- chains root at an identifier
+            local owner = root_name and lookup_owner(scope, root_name)
+            local bt = owner and owner.vars[root_name]
+            if bt and bt.kind == "class"
+                  and owner.type_bindings and owner.type_bindings[root_name] then
+                local parts = {}
+                for part in lvalue_key(node):gmatch("[^.]+") do
+                    parts[#parts + 1] = part
+                end
+                local cur = bt
+                for i = 2, #parts do
+                    local nm = parts[i]
+                    local nested = cur.nested and cur.nested[nm]
+                    if i == #parts and not nested then
+                        -- final segment may be a MEMBER (nearest ancestor wins)
+                        local c, mem = cur, nil
+                        while c do
+                            mem = c.methods[nm]
+                            if mem then break end
+                            c = c.base_class
+                        end
+                        if mem then
+                            node.static_owner = cur.qname or cur.name
+                            node.static_name = nm
+                            return mem                  -- the member's fn_type
+                        end
+                        type_error("no nested class or method '" .. nm
+                            .. "' in class '" .. cur.name .. "'", node)
+                    elseif nested then
+                        cur = nested
+                    else
+                        type_error("no nested class '" .. nm
+                            .. "' in class '" .. cur.name .. "'", node)
+                    end
+                end
+                return cur                              -- a plain nested-class reference
+            end
+        end
+        -- flow-narrowed field reads (type(self.v) == "number" guards)
+        if node.via_dot then
+            local key = lvalue_key(node)
+            if key then
+                local shadow = lookup_field_narrow(scope, key)
+                if shadow then return shadow end
+            end
+        end
         -- §3: reads of tables yield the value type WRAPPED NULLABLE
         local t = infer_expr(node.table, scope)
         if not node.via_dot then
@@ -562,6 +659,13 @@ infer_expr = function(node, scope, allow_type)
                 if m then break end
                 c = c.base_class
             end
+            if not m and obj_t.implements then
+                -- interface v2 defaults: the method may live on an interface
+                for _, iface in ipairs(obj_t.implements) do
+                    m = iface.methods[node.method_name.name]
+                    if m then break end
+                end
+            end
             if not m then
                 type_error("no such method '" .. node.method_name.name
                     .. "' in class '" .. obj_t.name .. "'", node)
@@ -580,13 +684,22 @@ infer_expr = function(node, scope, allow_type)
                 end
                 w = w.base_class
             end
+            if owner == obj_t and not obj_t.methods[node.method_name.name] then
+                -- no class in the chain provides it: an interface default does
+                for _, iface in ipairs(obj_t.implements or {}) do
+                    if iface.methods[node.method_name.name] then
+                        owner = iface
+                        break
+                    end
+                end
+            end
             local declarers = 0
             for _, k in pairs(class_registry) do
                 if k.class_type ~= "interface" and k.methods[node.method_name.name] then
                     declarers = declarers + 1
                 end
             end
-            if declarers <= 1 and obj_t.class_type ~= "interface" then
+            if (declarers <= 1 or obj_t.is_final) and obj_t.class_type ~= "interface" then
                 node.devirt_owner = owner.qname or owner.name
             end
             if m.kind == "function" then
@@ -665,7 +778,7 @@ infer_expr = function(node, scope, allow_type)
         for _, rt in ipairs(node.return_types or {}) do
             fn_type.rets[#fn_type.rets + 1] = from_ast(rt, scope)
         end
-        fn_type.ret = fn_type.rets[1] or T_ANY
+        fn_type.ret = fn_type.rets[1] or T_NIL
     end
 
     if kind == "FunctionDeclaration" then
@@ -1028,51 +1141,110 @@ check_stmt_raw = function(node, scope)
 
     if kind == "IfStatement" then
         infer_expr(node.condition, scope)
-        local then_scope = new_scope(scope)
-        -- flow narrowing v1: `if x ~= nil then` rebinds x nil-stripped in the
-        -- then-block (and the mirrored `if nil ~= x`). Assignments to x inside
-        -- the block keep the narrowed shadow — accepted v1 soundness trade.
+        -- flow narrowing: derive per-branch refinements from the condition.
+        --   x ~= nil / x == nil   -> nil-strip (either branch)
+        --   type(x) == "lit"      -> union member pick (either branch)
+        -- Assignments to the name inside a branch cancel that branch's shadow.
         local cond = node.condition
-        if cond.type == "BinaryOp" and cond.operator == "~=" then
-            local ident = nil
-            if cond.left.type == "Identifier" and cond.right.type == "Nil" then
-                ident = cond.left
-            elseif cond.right.type == "Identifier" and cond.left.type == "Nil" then
-                ident = cond.right
-            end
-            if ident then
-                local t = lookup(scope, ident.name)
-                if t then
-                    local narrowed = strip_nil(t)
-                    -- soundness: if the then-block ASSIGNS the name, the
-                    -- narrowed shadow would lie about the new value — skip it
-                    local function assigns_name(node)
-                        if type(node) ~= "table" then return false end
-                        if node.type then
-                            if node.type == "Assignment" and node.targets then
-                                for _, tgt in ipairs(node.targets) do
-                                    if tgt.type == "Identifier" and tgt.name == ident.name then
-                                        return true
-                                    end
-                                end
-                            end
-                            for k, v in pairs(node) do
-                                if k ~= "type" and type(v) == "table" and assigns_name(v) then
-                                    return true
-                                end
-                            end
-                        else
-                            for _, v in ipairs(node) do
-                                if assigns_name(v) then return true end
+        local function assigns_key(block, key)
+            local function walk(node)
+                if type(node) ~= "table" then return false end
+                if node.type then
+                    if node.type == "Assignment" and node.variables then
+                        for _, tgt in ipairs(node.variables) do
+                            if lvalue_key(tgt) == key then
+                                return true
                             end
                         end
-                        return false
                     end
-                    if narrowed ~= t and not assigns_name(node.thenBlock) then
-                        declare(then_scope, ident.name, narrowed)
+                    for k, v in pairs(node) do
+                        if k ~= "type" and type(v) == "table" and walk(v) then
+                            return true
+                        end
+                    end
+                else
+                    for _, v in ipairs(node) do
+                        if walk(v) then return true end
+                    end
+                end
+                return false
+            end
+            return walk(block)
+        end
+
+        -- extract the narrowed lvalue (var or dotted field) + per-branch types
+        local narrow_key, narrow_is_var, then_t, else_t
+        if cond.type == "BinaryOp" and (cond.operator == "~=" or cond.operator == "==") then
+            local lv = nil
+            if cond.left.type == "Identifier" or cond.left.type == "TableIndex" then
+                lv = cond.left
+            elseif cond.right.type == "Identifier" or cond.right.type == "TableIndex" then
+                lv = cond.right
+            end
+            if lv and (cond.right.type == "Nil" or cond.left.type == "Nil") then
+                local key = lvalue_key(lv)
+                if key then
+                    local t = infer_expr(lv, scope)
+                    local notnil = strip_nil(t)
+                    narrow_key, narrow_is_var = key, lv.type == "Identifier"
+                    if cond.operator == "~=" then
+                        then_t, else_t = notnil, T_NIL        -- else: x IS nil
+                    else
+                        then_t, else_t = T_NIL, notnil        -- then: x IS nil
                     end
                 end
             end
+        end
+        if not narrow_key and cond.type == "BinaryOp"
+              and (cond.operator == "==" or cond.operator == "~=") then
+            local call, lit
+            if cond.left.type == "FunctionCall" and cond.left.func.type == "Identifier"
+                  and cond.left.func.name == "type" and #cond.left.arguments == 1
+                  and cond.right.type == "String" then
+                call, lit = cond.left, cond.right.value
+            elseif cond.right.type == "FunctionCall" and cond.right.func.type == "Identifier"
+                  and cond.right.func.name == "type" and #cond.right.arguments == 1
+                  and cond.left.type == "String" then
+                call, lit = cond.right, cond.left.value
+            end
+            if call then
+                local lv = call.arguments[1]
+                local key = lvalue_key(lv)
+                if key then
+                    local t = infer_expr(lv, scope)
+                    if t and t.kind == "union" then
+                        local yes, no = {}, {}
+                        for _, mem in ipairs(t.members) do
+                            if mem.kind == "primitive" and mem.name == lit then
+                                yes[#yes + 1] = mem
+                            else
+                                no[#no + 1] = mem
+                            end
+                        end
+                        if #yes > 0 then
+                            narrow_key, narrow_is_var = key, lv.type == "Identifier"
+                            then_t = (#yes == 1) and yes[1] or union(yes)
+                            else_t = (#no == 1) and no[1] or ((#no > 1) and union(no) or T_NIL)
+                        end
+                    end
+                end
+            end
+        end
+
+        local function branch_shadow(target_scope, t)
+            if not narrow_key or not t then return end
+            if narrow_is_var then
+                local t0 = lookup(target_scope, narrow_key)
+                if t0 ~= t then declare(target_scope, narrow_key, t) end
+            else
+                target_scope.field_narrows = target_scope.field_narrows or {}
+                target_scope.field_narrows[narrow_key] = t
+            end
+        end
+
+        local then_scope = new_scope(scope)
+        if narrow_key and not assigns_key(node.thenBlock, narrow_key) then
+            branch_shadow(then_scope, then_t)
         end
         for _, s in ipairs(node.thenBlock.statements) do
             check_stmt(s, then_scope)
@@ -1080,6 +1252,9 @@ check_stmt_raw = function(node, scope)
         if node.elseBlock then
             if node.elseBlock.type == "Block" then
                 local else_scope = new_scope(scope)
+                if narrow_key and not assigns_key(node.elseBlock, narrow_key) then
+                    branch_shadow(else_scope, else_t)
+                end
                 for _, s in ipairs(node.elseBlock.statements) do
                     check_stmt(s, else_scope)
                 end
@@ -1138,6 +1313,11 @@ check_stmt_raw = function(node, scope)
 
     if kind == "ReturnStatement" then
         local rets = current_rets(scope)
+        -- a function that promises nothing cannot return anything
+        if rets and #rets == 0 and #node.values > 0 then
+            type_error("this function declares no return types — it cannot return values;"
+                .. " add return types or return nothing", node)
+        end
         if rets and #node.values == 1 then
             local spread = call_rets(node.values[1], scope)
             if spread then
@@ -1212,20 +1392,44 @@ check_stmt_raw = function(node, scope)
             ct.qname = qn                                       -- emitter-safe flat name
         end
         ct.qname = ct.qname or node.name.name
+        ct.is_final = node.is_final
         node.qname = ct.qname
+        local implements_ifaces = {}
         if node.extends_name then
             local base = lookup(scope, node.extends_name.name)
             if not base or base.kind ~= "class" then
                 type_error("unknown superclass '" .. node.extends_name.name .. "'", node)
             end
+            if base.class_type == "interface" then
+                type_error("interfaces are implemented, not extended — use 'implements' for '"
+                    .. base.name .. "'", node)
+            end
+            if base.is_final then
+                type_error("cannot extend final class '" .. base.name .. "'", node)
+            end
             ct.base_class = base
             node.extends_qname = base.qname or base.name
         end
+        for _, iname in ipairs(node.implements_list or {}) do
+            local iface = lookup(scope, iname.name)
+            if not iface or iface.kind ~= "class" or iface.class_type ~= "interface" then
+                type_error("'" .. iname.name .. "' is not an interface", node)
+            end
+            implements_ifaces[#implements_ifaces + 1] = iface
+        end
+        ct.implements = implements_ifaces                       -- method resolution reads this
+        node.implements_qnames = {}
+        for _, iface in ipairs(implements_ifaces) do
+            node.implements_qnames[#node.implements_qnames + 1] = iface.qname or iface.name
+        end
 
         -- member walk: fields, ctor_params, methods, bodies (fills the type)
-        for _, p in ipairs(node.params) do
-            ct.fields[p.name.name] = p.param_type
-                and from_ast(p.param_type, scope) or T_ANY
+        -- interface params are ctor MANDATES only — they never become fields
+        if node.class_type ~= "interface" then
+            for _, p in ipairs(node.params) do
+                ct.fields[p.name.name] = p.param_type
+                    and from_ast(p.param_type, scope) or T_ANY
+            end
         end
         ct.ctor_params = {}
         for _, p in ipairs(node.params) do
@@ -1244,12 +1448,19 @@ check_stmt_raw = function(node, scope)
         for _, m in ipairs(node.body.statements) do
             if m.type == "ClassDeclaration" then
                 check_stmt(m, class_scope)      -- nested class: full class-branch treatment
+                ct.nested = ct.nested or {}
+                ct.nested[m.name.name] = class_scope.vars[m.name.name]
             else
                 local fn_type = { kind = "function", params = {}, rets = {}, varargs = false }
                 ct.methods[m.name.name] = fn_type
                 fn_type.overrides = m.overrides
+                fn_type.is_default = m.is_default
                 fn_type.line = m.line
-                if kind == "interface"
+                if m.is_default then
+                    if not m.body or #m.body.statements == 0 then
+                        type_error("default function '" .. m.name.name .. "' requires a body", m)
+                    end
+                elseif kind == "interface"
                    or (node.abstract and (not m.body or #m.body.statements == 0))
                    or m.abstract then
                     fn_type.signature_only = true
@@ -1303,11 +1514,12 @@ check_stmt_raw = function(node, scope)
             end
         end
 
-        -- satisfaction: interfaces in the chain, once each
+        -- satisfaction: interfaces in the chain, once each, plus 'implements'
         local satisfied = {}
-        local c = ct.base_class
-        while c do
-            if c.class_type == "interface" then
+        local function check_iface(c)
+            if satisfied[c] then return end
+            satisfied[c] = true
+            do
                 for fname, ftype in pairs(c.fields) do
                     local provided = find_member(ct, "fields", fname)
                     if not provided then
@@ -1320,7 +1532,9 @@ check_stmt_raw = function(node, scope)
                 end
                 for mname, im in pairs(c.methods) do
                     local impl = find_member(ct, "methods", mname)
-                    if not impl then
+                    if not impl and im.is_default then
+                        -- default methods satisfy themselves
+                    elseif not impl then
                         type_error("class '" .. ct.name .. "' does not implement method '"
                             .. mname .. "' from interface '" .. c.name .. "'", node)
                     elseif #impl.params ~= #im.params then
@@ -1331,9 +1545,30 @@ check_stmt_raw = function(node, scope)
                             .. c.name .. "'", node)
                     end
                 end
+                -- interface v2 ctor MANDATES: name-based — the class must have a
+                -- parameter of that name whose type accepts the mandated type
+                for _, mp in ipairs(c.ctor_params or {}) do
+                    local cpp = nil
+                    for _, cp in ipairs(ct.ctor_params or {}) do
+                        if cp.name == mp.name then cpp = cp break end
+                    end
+                    if not cpp then
+                        type_error("class '" .. ct.name .. "' needs a constructor parameter '"
+                            .. mp.name .. "' (mandated by interface '" .. c.name .. "')", node)
+                    elseif not compatible(mp.ptype, cpp.ptype) then
+                        type_error("constructor parameter '" .. mp.name .. "' of '" .. ct.name
+                            .. "' must accept " .. (mp.ptype and describe(mp.ptype) or "any")
+                            .. " (mandated by interface '" .. c.name .. "')", node)
+                    end
+                end
             end
+        end
+        local c = ct.base_class
+        while c do
+            if c.class_type == "interface" then check_iface(c) end
             c = c.base_class
         end
+        for _, iface in ipairs(implements_ifaces) do check_iface(iface) end
 
         declare(scope, node.name.name, ct)                      -- LAST: declare after validation
         return

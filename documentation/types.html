@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>
+  (function () {
+    var stored = null;
+    try { stored = localStorage.getItem("soleil-theme"); } catch (e) {}
+    var theme = stored === "dark" || stored === "light"
+      ? stored
+      : (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = theme;
+  })();
+</script>
+<title>Type System — Soleil</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script type="module">
+  import {styles as typescaleStyles} from 'https://esm.sh/@material/web@2.5.0/typography/md-typescale-styles.js';
+  document.adoptedStyleSheets.push(typescaleStyles.styleSheet);
+  import 'https://esm.sh/@material/web@2.5.0/all.js';
+</script>
+</head>
+<body>
+
+<header class="app-bar">
+  <md-icon-button aria-label="Menu"><md-icon>menu</md-icon></md-icon-button>
+  <a class="brand" href="index.html">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="11" cy="12.5" r="10" fill="none" stroke="currentColor" stroke-width="1" opacity=".4"/>
+      <circle cx="11" cy="12.5" r="7" fill="currentColor"/>
+      <circle cx="18" cy="5.5" r="2.2" fill="currentColor"/>
+      <circle cx="14.4" cy="3.1" r="1.1" fill="currentColor"/>
+    </svg>
+    <span class="title-large">Soleil</span>
+  </a>
+  <md-filled-text-field
+    class="search"
+    type="search"
+    placeholder="Search the Soleil docs..."
+    aria-label="Search the Soleil docs">
+    <md-icon slot="leading-icon">search</md-icon>
+  </md-filled-text-field>
+  <md-icon-button id="theme-toggle" aria-label="Toggle theme"><md-icon id="theme-icon">dark_mode</md-icon></md-icon-button>
+</header>
+
+<div class="layout">
+
+  <nav class="nav" aria-label="Docs navigation">
+    <span class="nav-heading label-large">LANGUAGE</span>
+    <md-list-item type="link" href="index.html">
+      <md-icon slot="start">home</md-icon>
+      <span slot="headline">Overview</span>
+    </md-list-item>
+    <md-list-item type="link" href="syntax.html">
+      <md-icon slot="start">rocket_launch</md-icon>
+      <span slot="headline">Getting Started</span>
+    </md-list-item>
+    <md-list-item type="link" href="index.html#builds">
+      <md-icon slot="start">layers</md-icon>
+      <span slot="headline">Compiler Builds</span>
+    </md-list-item>
+    <md-list-item type="link" href="tooling.html">
+      <md-icon slot="start">terminal</md-icon>
+      <span slot="headline">Tooling</span>
+    </md-list-item>
+    <span class="nav-heading label-large">DOCUMENTATION</span>
+    <span class="nav-heading label-medium" style="padding:4px 16px;opacity:.7">CORE</span>
+    <md-list-item type="link" href="syntax.html">
+      <md-icon slot="start">code</md-icon>
+      <span slot="headline">Syntax</span>
+    </md-list-item>
+    <md-list-item type="link" href="types.html" class="active">
+      <md-icon slot="start">data_object</md-icon>
+      <span slot="headline">Type System</span>
+    </md-list-item>
+    <md-list-item type="link" href="null-operators.html">
+      <md-icon slot="start">question_mark</md-icon>
+      <span slot="headline">Null Operators</span>
+    </md-list-item>
+    <md-list-item type="link" href="functions.html">
+      <md-icon slot="start">functions</md-icon>
+      <span slot="headline">Functions</span>
+    </md-list-item>
+    <md-list-item type="link" href="modules.html">
+      <md-icon slot="start">package</md-icon>
+      <span slot="headline">Modules &amp; Scope</span>
+    </md-list-item>
+    <md-list-item type="link" href="classes.html">
+      <md-icon slot="start">workspaces</md-icon>
+      <span slot="headline">Classes &amp; Objects</span>
+    </md-list-item>
+    <span class="nav-heading label-medium" style="padding:4px 16px;opacity:.7">ADVANCED</span>
+    <md-list-item type="link" href="errors.html">
+      <md-icon slot="start">error</md-icon>
+      <span slot="headline">Error Handling</span>
+    </md-list-item>
+    <md-list-item type="link" href="metatables.html">
+      <md-icon slot="start">sync</md-icon>
+      <span slot="headline">Metatables &amp; Coroutines</span>
+    </md-list-item>
+    <span class="nav-heading label-large">RESOURCES</span>
+    <md-list-item type="button">
+      <md-icon slot="start">science</md-icon>
+      <span slot="headline">Examples</span>
+    </md-list-item>
+    <md-list-item type="button">
+      <md-icon slot="start">history</md-icon>
+      <span slot="headline">Changelog</span>
+    </md-list-item>
+  </nav>
+
+  <main class="content doc">
+    <header class="page-header">
+      <span class="kicker label-large">DOCUMENTATION — CORE</span>
+      <h1>Type System</h1>
+      <p class="body-large">Soleil is strict by description: there is no implicit escape from the type system. Types are checked at compile time and erased — the output is plain Lua 5.1.</p>
+    </header>
+
+    <section id="primitives">
+      <h2>Value types</h2>
+      <p class="body-large">Every Soleil type maps 1:1 to a Lua 5.1 value:</p>
+
+      <ul class="body-large">
+        <li><code>boolean</code>, <code>number</code>, <code>string</code></li>
+        <li><code>nil</code> — a first-class singleton type</li>
+        <li><code>table[V]</code> / <code>table[K, V]</code> / <code>table[any]</code> — the table family</li>
+        <li>class / interface / data names — nominal types</li>
+      </ul>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">primitives.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">local</span> name : string = <span class="tok-str">"Sol"</span>
+<span class="tok-kw">local</span> mass : number = <span class="tok-num">1.989e30</span>
+<span class="tok-kw">local</span> alive : boolean = <span class="tok-kw">true</span>
+<span class="tok-kw">local</span> nothing : <span class="tok-kw">nil</span> = <span class="tok-kw">nil</span></code></pre>
+      </div>
+    </section>
+
+    <section id="unions">
+      <h2>Nullability and unions</h2>
+      <p class="body-large">Unions are the one composite type mechanism. Nullability is sugar, and <code>T?</code> is the canonical spelling — <code>x : T | nil</code> is not grammar. A nullable union puts the <code>?</code> on its last member: <code>A | B?</code>. The <code>nil</code> literal has type <code>nil</code>, so it is assignable to any union containing nil — but never to a plain <code>T</code>. Nullability is idempotent: <code>(T?)?</code> is just <code>T?</code>.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">unions.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">local</span> x : number?         = <span class="tok-kw">nil</span>     <span class="tok-com">-- ok</span>
+<span class="tok-kw">local</span> y : number          = <span class="tok-kw">nil</span>     <span class="tok-com">-- error: nil is not a number</span>
+<span class="tok-kw">local</span> u : string | number = <span class="tok-num">1</span>       <span class="tok-com">-- ok</span>
+<span class="tok-kw">local</span> n : <span class="tok-kw">nil</span>             = <span class="tok-kw">nil</span>     <span class="tok-com">-- ok</span></code></pre>
+      </div>
+    </section>
+
+    <section id="tables">
+      <h2>Tables</h2>
+      <p class="body-large">Tables come in three canonical forms. A bare <code>table</code> annotation is a parse error — pick a form. Empty literals must be annotated. Reads are always nullable: <code>t[k]</code> has type <code>V?</code> even when <code>V</code> is not — discharge with a nil-guard, <code>?:</code>, or <code>!!</code>.</p>
+
+      <ul class="body-large">
+        <li><code>table[V]</code> — arrays (number-keyed), iterate with <code>ipairs</code>, length with <code>#</code></li>
+        <li><code>table[K, V]</code> — maps, iterate with <code>pairs</code></li>
+        <li><code>table[any]</code> — the heterogeneous escape hatch</li>
+      </ul>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">tables.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">local</span> xs : table[number]       = { <span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span> }
+<span class="tok-kw">local</span> ages : table[string, number] = { alice = <span class="tok-num">100</span> }
+<span class="tok-kw">local</span> junk : table[any]        = { <span class="tok-num">1</span>, <span class="tok-str">"two"</span>, <span class="tok-kw">true</span> }
+
+<span class="tok-kw">local</span> first : number? = xs[<span class="tok-num">1</span>]  <span class="tok-com">-- reads are nullable</span></code></pre>
+      </div>
+
+      <p class="body-large">Literals are element-checked: a positional literal infers the union of its elements, so <code>{ Circle(1), Square(1) }</code> types as <code>table[number, Circle | Square]</code> and assigns cleanly to <code>table[Circle | Square]</code> — while <code>{ 1, "x" }</code> is rejected against <code>table[number]</code>. And per Lua's prefixexp rule, constructors are never callable or indexable directly: write <code>({1, 2})[1]</code>.</p>
+    </section>
+
+    <section id="any">
+      <h2>any — table-only</h2>
+      <p class="body-large"><code>any</code> is legal <em>only inside table brackets</em>: <code>table[any]</code>, <code>table[K, any]</code>, <code>table[any, V]</code>, and union members within those brackets (<code>table[number | any]</code>). Everywhere else — parameters, returns, locals, class fields, interface members — bare <code>any</code> is a compile error.</p>
+
+      <p class="body-large">The split is deliberate: dynamic signatures are typed <code>unknown</code> (see below); dynamic collections are typed with <code>any</code> in their brackets. Inside its legal home, <code>any</code> is assignable in both directions — the one trusted channel, and opt-in only: nothing produces it implicitly. It also cannot be used as a class name.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">any.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">local</span> xs  : table[any]         = { <span class="tok-num">1</span>, <span class="tok-str">"two"</span>, <span class="tok-kw">true</span> }  <span class="tok-com">-- ok</span>
+<span class="tok-kw">local</span> map : table[any, number] = {}                  <span class="tok-com">-- ok</span>
+
+<span class="tok-com">-- local bad : any = 1          -- error: bare any outside a table</span></code></pre>
+      </div>
+    </section>
+
+    <section id="unknown">
+      <h2>unknown</h2>
+      <p class="body-large">unknown is the type of values whose shape the compiler cannot know. The only producer is varargs data: <code>select(n, ...)</code> spreads unknowns, and a bare <code>...</code> flows as unknown into <code>any</code> positions. Anything flows <em>in</em>; nothing flows back <em>out</em> except to itself, to <code>any</code>, or through a checkpoint. Arithmetic, concatenation, indexing, and calls on unknown are all errors.</p>
+
+      <div class="code-card">
+        <div class="code-head">
+          <span class="title-medium">unknown.sol</span>
+          <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+        </div>
+        <pre><code><span class="tok-kw">local</span> <span class="tok-kw">data</span> : unknown = <span class="tok-num">5</span>
+<span class="tok-kw">data</span> = <span class="tok-str">"now a string"</span>        <span class="tok-com">-- anything flows in</span>
+
+<span class="tok-kw">local</span> flexible : any = <span class="tok-kw">data</span>  <span class="tok-com">-- out to any: ok</span>
+<span class="tok-kw">local</span> label : string = <span class="tok-fn">tostring</span>(<span class="tok-kw">data</span>)  <span class="tok-com">-- through a checkpoint</span>
+
+<span class="tok-kw">local</span> n : number = <span class="tok-kw">data</span>      <span class="tok-com">-- error: cannot initialize</span></code></pre>
+      </div>
+
+      <p class="body-large">What produces what:</p>
+
+      <ul class="body-large">
+        <li>annotated function call — exactly its declared return types</li>
+        <li>rets-less function call — <code>nil</code></li>
+        <li><code>select("#", ...)</code> — <code>number</code>; <code>select(n, ...)</code> — <code>n-1</code> unknowns</li>
+        <li><code>tonumber(x)</code> — <code>number?</code>; <code>tostring(x)</code> — <code>string</code>; <code>type(x)</code> — <code>string</code></li>
+      </ul>
+
+      <p class="note body-medium">Nothing produces unknown or any implicitly. any is written by the programmer or it does not exist.</p>
+    </section>
+
+    <nav class="pn" aria-label="Pagination">
+      <a href="syntax.html"><span class="dir label-medium">Previous</span><span class="name title-medium">Syntax</span></a>      <a class="next" href="null-operators.html"><span class="dir label-medium">Up next</span><span class="name title-medium">Null Operators</span></a>
+    </nav>
+  </main>
+
+  <aside class="toc" aria-label="On this page">
+    <span class="label-large" style="color:var(--on-surface-variant)">ON THIS PAGE</span>
+    <a href="#primitives">Value types</a>
+    <a href="#unions">Nullability and unions</a>
+    <a href="#tables">Tables</a>
+    <a href="#any">any — table-only</a>
+    <a href="#unknown">unknown</a>
+  </aside>
+
+</div>
+
+<footer class="footer">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" aria-hidden="true" style="width:24px;height:24px">
+      <circle cx="11" cy="12.5" r="10" fill="none" stroke="currentColor" stroke-width="1" opacity=".4"/>
+      <circle cx="11" cy="12.5" r="7" fill="currentColor"/>
+      <circle cx="18" cy="5.5" r="2.2" fill="currentColor"/>
+      <circle cx="14.4" cy="3.1" r="1.1" fill="currentColor"/>
+    </svg>
+    <span class="title-medium">Soleil</span>
+  </div>
+  <span class="body-small">© 2026 The Soleil Project. A typed, object-oriented dialect of Lua.</span>
+</footer>
+
+<md-fab variant="primary" aria-label="Back to top"><md-icon slot="icon">keyboard_arrow_up</md-icon></md-fab>
+
+<script src="site.js" defer></script>
+</body>
+</html>

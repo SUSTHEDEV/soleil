@@ -30,8 +30,9 @@ local valid = {
   "local u : number | string = 1",
   "local u : number | string = \"a\"",
   -- any accepts everything, everything accepts any
-  "local a : any = 1",
-  "local a : any = {}",
+  -- any is table-only now; unknown is the dynamic-value type
+  "local u : unknown = 1",
+  "local u : unknown = {}",
   "local n : number = a",  -- placeholder replaced below
   -- assignment compatibility
   "local x : number = 1\nx = 2",
@@ -77,7 +78,7 @@ local valid = {
   -- unknown: flows in, checkpointed out
   "local x : unknown = 5",
   "local x : unknown = \"s\"",
-  "local x : unknown = 5\nlocal a : any = x",
+  "local x : unknown = 5\nlocal n : number? = tonumber(x)",
   -- abstract classes: signatures, bodies, mixed
   "abstract class Animal\n    abstract function speak(self : Animal) : string\nend",
   "abstract class Animal\n    function breathe(self : Animal) print(1) end\nend",
@@ -95,7 +96,7 @@ local valid = {
   "class Player(name : string?, id : number) function say(self : Player, msg : string) print(msg) end end\nlocal p : Player? = nil",
   "data Pair(a : number, b : number) end",
   "object Counter function inc(self, x : number) : number return x end end",
-  "interface Shape(name : string)\n    function area(self : Shape) : number\nend\nclass Circle(x : number, name : string) extends Shape\n    function area(self : Circle) : number return self.x end\nend",
+  "interface Shape(name : string)\n    function area(self : Shape) : number\nend\nclass Circle(x : number, name : string) implements Shape\n    function area(self : Circle) : number return 42 end\nend",
   -- inheritance + rule 7 + super
   "class Player(name : string?) function say(self : Player) end end\nclass A extends Player(\"\") override function say(self : A) end end",
   "class Player(name : string?) function say(self : Player) end end\nclass A extends Player(\"\") override function say(self : A) super.say(self) end end",
@@ -103,7 +104,7 @@ local valid = {
   "function g() : number return 1 end\nlocal n : number = g()",
   "function h() : number, string return 1, \"a\" end\nlocal n : number = h()",
   "local f = function() : number, string return 1, \"a\" end\nlocal n : number = f()",
-  "interface I\n    function area(self : I) : number\nend\nclass C extends I\n    function area(self : C) : number return 1 end\nend",
+  "interface I\n    function area(self : I) : number\nend\nclass C implements I\n    function area(self : C) : number return 1 end\nend",
   "class B(x : number) function two(self : B) : number, string return 1, \"s\" end end\nclass A extends B(x)\n    override function two(self : A) : number, string return 1, \"s\" end\nend",
   -- call-ret propagation
   "function get() : number, string return 1, \"a\" end\nfunction f2() : number, string return get() end",
@@ -141,14 +142,70 @@ local valid = {
   "class A(x : number)\n    function get(self : A) : number return self.x end\nend\n"
     .. "class B(y : number) extends A(y)\n    function both(self : B) : number return self.x + self.y end\nend\n"
     .. "local n : number = B(3):both()",
-  "local function make()\n    class C(x : number)\n        function get(self : C) : number return self.x end\n    end\n    return C(5)\nend\nlocal n : number = make():get()",
-  "local function f()\n    class Q(x : number) function g(self : Q) : number return self.x end end\n    return Q(1):g() end\n"
-    .. "local function h()\n    class Q(x : number) function g(self : Q) : number return self.x end end\n    return Q(2):g() end",
+  "class C(x : number)\n    function get(self : C) : number return self.x end\nend\n"
+    .. "local function make() : C\n    return C(5)\nend\nlocal n : number = make():get()",
+  "local function f() : number\n    class Q(x : number) function g(self : Q) : number return self.x end end\n    return Q(1):g() end\n"
+    .. "local function h() : number\n    class Q(x : number) function g(self : Q) : number return self.x end end\n    return Q(2):g() end",
   "do local z = 7 print(z) end",
+  -- interface v2: constructor mandates + implements (SPEC §9)
+  "interface Named(x : string)\n    function name(self : Named) : string\nend\n"
+    .. "class P(x : string) implements Named\n    function name(self : P) : string return self.x end\nend",
+  "interface A(x : string)\n    function fa(self : A) : string\nend\n"
+    .. "interface B(x : number)\n    function fb(self : B) : number\nend\n"
+    .. "class C(x : string | number) implements A, B\n"
+    .. "    function fa(self : C) : string return \"s\" end\n"
+    .. "    function fb(self : C) : number return 1 end\nend",
+  "interface A(x : string) end\ninterface B(x : number) end\n"
+    .. "class C(x : string | number?) implements A, B end",
+  "interface Logged(tag : string)\n    function log(self : Logged) : string\nend\n"
+    .. "class Base(x : number)\n    function get(self : Base) : number return self.x end\nend\n"
+    .. "class C(tag : string, x : number) extends Base(x) implements Logged\n"
+    .. "    function log(self : C) : string return \"ok\" end\nend",
+  "interface Greeter\n    function greet(self : Greeter) : string\nend\n"
+    .. "class Dog(name : string) implements Greeter\n    function greet(self : Dog) : string return self.name end\nend\n"
+    .. "local g : Greeter = Dog(\"rex\")",
+  -- interface v2: default methods
+  "interface Greeter\n    default function greet(self : Greeter) : string\n        return \"hello\" end\nend\n"
+    .. "class Dog(x : string) implements Greeter\n    function who(self : Dog) : string return self.x end\nend\n"
+    .. "local g : Greeter = Dog(\"rex\")",
+  "interface Greeter\n    default function greet(self : Greeter) : string\n        return \"hello\" end\nend\n"
+    .. "class Dog(x : string) implements Greeter\n"
+    .. "    function greet(self : Dog) : string return self.x end\n"
+    .. "    function who(self : Dog) : string return self.x end\nend\n"
+    .. "local g : Greeter = Dog(\"rex\")",
+  -- interface v2: name-based ctor mandates (order-free)
+  "interface Shape(name : string)\n    function area(self : Shape) : number\nend\n"
+    .. "class Circle(x : number, name : string) implements Shape\n"
+    .. "    function area(self : Circle) : number return 1 end\nend",
+  "interface A(x : string) end\n"
+    .. "class C(x : string, extra : number) implements A end",
+  -- final classes
+  "final class Seal(x : number)\n    function who(self : Seal) : string return \"s\" end\nend\n"
+    .. "local s = Seal(1)\nlocal w : string = s:who()",
+  -- nested final/abstract class declarations
+  "class Outer\n    final class Seal(x : number)\n        function v(self : Seal) : number return self.x end\n    end\nend",
+  "class Outer\n    abstract class Base(x : number)\n        abstract function go(self : Base) : number\n    end\nend",
+  -- qualified nested-class instantiation (Outer.Seal(...))
+  "class Outer\n    final class Seal(x : number)\n        function v(self : Seal) : number return self.x end\n    end\nend\n"
+    .. "local o = Outer.Seal(7)\nlocal n : number = o:v()",
+  -- static qualified member calls (flat-dispatched, self explicit)
+  "class Outer\n    class Inner(x : number)\n        function double(self : Inner) : number return self.x * 2 end\n    end\nend\n"
+    .. "local inst = Outer.Inner(5)\nlocal n : number = Outer.Inner.double(inst)",
+  -- flow narrowing: else-branch + typeof (locals and dotted fields)
+  "local function f(x : number | string) : string\n"
+    .. "    if type(x) == \"string\" then return x .. \"!\" end\n"
+    .. "    return tostring(x)\nend",
+  "class P(v : number | string)\n    function double(self : P) : number\n"
+    .. "        if type(self.v) == \"number\" then return self.v + 1 end\n"
+    .. "        return 0\n    end\nend",
+  "local xs : table[number] = {}\nlocal s = xs[1]\nif s == nil then\n    print(\"none\")\nelse\n    print(s + 1)\nend",
+  "class P(v : number?)\n    function f(self : P) : number\n"
+    .. "        if self.v ~= nil then return self.v + 1 end\n"
+    .. "        return 0\n    end\nend",
 }
 
 -- fix the any-echo case: needs `a` declared first
-valid[15] = "local a : any = 1\nlocal n : number = a"
+valid[15] = "local u : unknown = 1\nlocal n : number = tonumber(u)!!"
 
 -- ---------------------------------------------------------------------------
 -- INVALID: must raise a type error containing the fragment
@@ -202,8 +259,8 @@ local invalid = {
   { "class Player(name : string?) function say(self : Player) end end\nclass A extends Player(\"\") override function say(self : A) super.say() end end", "expects 1 arguments" },
   { "class L function f(self : L) super.f(self) end end", "has no superclass" },
   -- interfaces: satisfaction
-  { "interface Shape(name : string)\n    function area(self : Shape) : number\nend\nclass Circle(x : number) extends Shape\nend", "does not implement" },
-  { "interface Shape(name : string)\n    function area(self : Shape) : number\nend\nclass Circle(x : number, name : string) extends Shape\n    function area(self : Circle) : string return \"s\" end\nend", "incompatible return type" },
+  { "interface Shape(name : string)\n    function area(self : Shape) : number\nend\nclass Circle(x : number) implements Shape\nend", "does not implement" },
+  { "interface Shape(name : string)\n    function area(self : Shape) : number\nend\nclass Circle(x : number, name : string) implements Shape\n    function area(self : Circle) : string return \"s\" end\nend", "incompatible return type" },
   { "interface Shape function area(self : Shape) : number return 1 end end", "cannot have bodies" },
   -- abstract classes
   { "abstract class A\n    abstract function f(self : A) print(1) end\nend", "abstract methods cannot have bodies" },
@@ -238,8 +295,35 @@ local invalid = {
   { "class Bag(items : table[number]) end\nlocal b = Bag({9, \"x\"})", "type mismatch" },
   -- class-name discipline
   { "local function f()\n    class Q(x : number) end\n    class Q(y : number) end\n    return Q(1)\nend", "duplicate class name" },
-  { "local function f()\n    class Q(x : number) end\n    return Q\nend", "as a value" },
+  { "local function f() : unknown\n    class Q(x : number) end\n    return Q\nend", "as a value" },
+  { "local u : unknown = 1\nlocal n : number = u", "expected a compatible type" },
+  { "local a : any = 1", "only legal inside table types" },
   { "class A(x : number) end\nclass B extends A\n    function f(self : B) : number return super.nope(self) end\nend", "no method" },
+  -- interface v2: mandate + implements violations
+  { "interface A(x : string) end\ninterface B(x : number) end\n"
+    .. "class C(x : string) implements A, B end", "must accept" },
+  { "interface A(x : string) end\ninterface B(x : number, y : number) end\n"
+    .. "class C(x : string | number) implements A, B end", "needs a constructor parameter" },
+  { "class Base(x : number) end\nclass C(x : number) implements Base end", "is not an interface" },
+  { "interface I\n    function f(self : I)\nend\nclass D extends I end", "implemented, not extended" },
+  -- default-method violations
+  { "interface I\n    default function f(self : I) : number\nend", "requires a body" },
+  { "class C\n    default function f(self : C) : number return 1 end\nend", "only allowed inside interfaces" },
+  { "interface I\n    function f(self : I) : number\n        return 1\n    end\nend", "cannot have bodies" },
+  -- final classes
+  { "final class Seal(x : number) end\nclass Sub extends Seal end", "cannot extend final class" },
+  { "class Outer\n    final class Seal(x : number) end\nend\nlocal o = Outer.Nope(1)", "no nested class or method 'Nope'" },
+  -- narrowing soundness
+  { "local function f(x : number | string) : string\n"
+    .. "    if type(x) == \"number\" then return x .. \"!\" end\n"
+    .. "    return \"\"\nend", "needs strings" },
+  { "local function f(x : number | string) : number\n"
+    .. "    if type(x) == \"number\" then return x end\n"
+    .. "    return x + 1\nend", "needs numbers" },
+  { "local xs : table[number] = {}\nlocal s = xs[1]\nif s ~= nil then\n    s = nil\n    print(s + 1)\nend", "needs numbers" },
+  { "class P(v : number?)\n    function f(self : P) : number\n"
+    .. "        if self.v ~= nil then\n            self.v = nil\n            return self.v + 1\n        end\n"
+    .. "        return 0\n    end\nend", "needs numbers" },
 }
 
 -- ---------------------------------------------------------------------------

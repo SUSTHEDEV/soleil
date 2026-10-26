@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>
+  (function () {
+    var stored = null;
+    try { stored = localStorage.getItem("soleil-theme"); } catch (e) {}
+    var theme = stored === "dark" || stored === "light"
+      ? stored
+      : (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = theme;
+  })();
+</script>
+<title>Soleil — a typed, object-oriented dialect of Lua</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+<script type="module">
+  import {styles as typescaleStyles} from 'https://esm.sh/@material/web@2.5.0/typography/md-typescale-styles.js';
+  document.adoptedStyleSheets.push(typescaleStyles.styleSheet);
+  import 'https://esm.sh/@material/web@2.5.0/all.js';
+</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="app-bar">
+  <md-icon-button aria-label="Menu"><md-icon>menu</md-icon></md-icon-button>
+  <div class="brand">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="11" cy="12.5" r="10" fill="none" stroke="currentColor" stroke-width="1" opacity=".4"/>
+      <circle cx="11" cy="12.5" r="7" fill="currentColor"/>
+      <circle cx="18" cy="5.5" r="2.2" fill="currentColor"/>
+      <circle cx="14.4" cy="3.1" r="1.1" fill="currentColor"/>
+    </svg>
+    <span class="title-large">Soleil</span>
+  </div>
+  <md-filled-text-field
+    class="search"
+    type="search"
+    placeholder="Search the Soleil docs..."
+    aria-label="Search the Soleil docs">
+    <md-icon slot="leading-icon">search</md-icon>
+  </md-filled-text-field>
+  <span class="badge-wrap">
+    <md-icon-button aria-label="Notifications"><md-icon>notifications</md-icon></md-icon-button>
+    <span class="badge">3</span>
+  </span>
+  <md-icon-button id="theme-toggle" aria-label="Toggle theme"><md-icon id="theme-icon">dark_mode</md-icon></md-icon-button>
+</header>
+
+<div class="layout">
+
+  <nav class="nav" aria-label="Docs navigation">
+    <span class="nav-heading label-large">LANGUAGE</span>
+    <md-list-item type="button" class="active">
+      <md-icon slot="start">home</md-icon>
+      <span slot="headline">Overview</span>
+    </md-list-item>
+    <md-list-item type="link" href="syntax.html">
+      <md-icon slot="start">rocket_launch</md-icon>
+      <span slot="headline">Getting Started</span>
+    </md-list-item>
+    <md-list-item type="link" href="index.html#builds">
+      <md-icon slot="start">layers</md-icon>
+      <span slot="headline">Compiler Builds</span>
+    </md-list-item>
+    <md-list-item type="link" href="tooling.html">
+      <md-icon slot="start">terminal</md-icon>
+      <span slot="headline">Tooling</span>
+    </md-list-item>
+    <span class="nav-heading label-large">DOCUMENTATION</span>
+    <span class="nav-heading label-medium" style="padding:4px 16px;opacity:.7">CORE</span>
+    <md-list-item type="link" href="syntax.html">
+      <md-icon slot="start">code</md-icon>
+      <span slot="headline">Syntax</span>
+    </md-list-item>
+    <md-list-item type="link" href="types.html">
+      <md-icon slot="start">data_object</md-icon>
+      <span slot="headline">Type System</span>
+    </md-list-item>
+    <md-list-item type="link" href="null-operators.html">
+      <md-icon slot="start">question_mark</md-icon>
+      <span slot="headline">Null Operators</span>
+    </md-list-item>
+    <md-list-item type="link" href="functions.html">
+      <md-icon slot="start">functions</md-icon>
+      <span slot="headline">Functions</span>
+    </md-list-item>
+    <md-list-item type="link" href="modules.html">
+      <md-icon slot="start">package</md-icon>
+      <span slot="headline">Modules &amp; Scope</span>
+    </md-list-item>
+    <md-list-item type="link" href="classes.html">
+      <md-icon slot="start">workspaces</md-icon>
+      <span slot="headline">Classes &amp; Objects</span>
+    </md-list-item>
+    <span class="nav-heading label-medium" style="padding:4px 16px;opacity:.7">ADVANCED</span>
+    <md-list-item type="link" href="errors.html">
+      <md-icon slot="start">error</md-icon>
+      <span slot="headline">Error Handling</span>
+    </md-list-item>
+    <md-list-item type="link" href="metatables.html">
+      <md-icon slot="start">sync</md-icon>
+      <span slot="headline">Metatables &amp; Coroutines</span>
+    </md-list-item>
+    <span class="nav-heading label-large">RESOURCES</span>
+    <md-list-item type="button">
+      <md-icon slot="start">science</md-icon>
+      <span slot="headline">Examples</span>
+    </md-list-item>
+    <md-list-item type="button">
+      <md-icon slot="start">history</md-icon>
+      <span slot="headline">Changelog</span>
+    </md-list-item>
+  </nav>
+
+  <main class="content">
+
+    <section class="hero" id="overview">
+      <div class="moon-glow"></div>
+      <md-assist-chip class="version">
+        <md-icon slot="icon">verified</md-icon>
+        v1 — core complete
+      </md-assist-chip>
+      <h1 class="display-large">A typed, object-oriented dialect of Lua</h1>
+      <p class="body-large">Soleil brings types and classes to Lua without leaving the language you know. Primarily targeting Lua 5.1 — and compatible with Lua 5.2 and later when you download the appropriate compiler builds.</p>
+      <div class="btn-row">
+        <md-filled-button>
+          <md-icon slot="icon">rocket_launch</md-icon>
+          Get Started
+        </md-filled-button>
+        <md-filled-tonal-button id="snack-trigger">
+          <md-icon slot="icon">download</md-icon>
+          Download for Lua 5.1
+        </md-filled-tonal-button>
+        <md-outlined-button>Documentation</md-outlined-button>
+        <md-text-button>GitHub</md-text-button>
+      </div>
+    </section>
+
+    <div class="chip-row">
+      <md-filter-chip selected>All topics</md-filter-chip>
+      <md-filter-chip>Types</md-filter-chip>
+      <md-filter-chip>Classes</md-filter-chip>
+      <md-filter-chip>Compiler builds</md-filter-chip>
+      <md-filter-chip>Examples</md-filter-chip>
+    </div>
+
+    <div class="section-head" id="why">
+      <h2 class="headline-medium">Why Soleil?</h2>
+      <md-text-button>View all features</md-text-button>
+    </div>
+
+    <section class="card-grid">
+      <article class="card elevated">
+        <div class="icon-wrap"><md-icon>data_object</md-icon></div>
+        <h3 class="title-large">Typed Lua</h3>
+        <p class="body-medium">Soleil is a typed dialect of Lua. Describe your data with type annotations while keeping everything that makes Lua feel like Lua.</p>
+        <div class="actions">
+          <md-text-button>Get started</md-text-button>
+          <md-text-button>Type system</md-text-button>
+        </div>
+      </article>
+      <article class="card elevated">
+        <div class="icon-wrap tert"><md-icon>workspaces</md-icon></div>
+        <h3 class="title-large">Object Oriented</h3>
+        <p class="body-medium">Define classes, methods, and instances with familiar, Lua-flavored syntax — no ceremony required.</p>
+        <div class="actions">
+          <md-text-button>Classes guide</md-text-button>
+          <md-text-button>Learn more</md-text-button>
+        </div>
+      </article>
+      <article class="card elevated">
+        <div class="icon-wrap sec"><md-icon>layers</md-icon></div>
+        <h3 class="title-large">Lua Compatibility</h3>
+        <p class="body-medium">Primarily targets Lua 5.1, and stays compatible with Lua 5.2 and later — just download the compiler build for your runtime.</p>
+        <div class="actions">
+          <md-text-button>Download builds</md-text-button>
+          <md-text-button>Learn more</md-text-button>
+        </div>
+      </article>
+    </section>
+
+    <section class="code-card" id="syntax">
+      <div class="code-head">
+        <span class="title-medium">example.sol</span>
+        <md-icon-button aria-label="Copy"><md-icon>content_copy</md-icon></md-icon-button>
+      </div>
+      <pre><code><span class="tok-com">-- Soleil: a strict, statically-typed dialect of Lua 5.1</span>
+
+<span class="tok-kw">class</span> Player(name : <span class="tok-kw">string</span>, id : <span class="tok-kw">number</span>)
+    <span class="tok-kw">function</span> <span class="tok-fn">say</span>(<span class="tok-kw">self</span> : Player, msg : <span class="tok-kw">string</span>)
+        <span class="tok-fn">print</span>(<span class="tok-kw">self</span>.name .. <span class="tok-str">" says: "</span> .. msg)
+    <span class="tok-kw">end</span>
+<span class="tok-kw">end</span>
+
+<span class="tok-kw">local</span> p : Player = <span class="tok-fn">Player</span>(<span class="tok-str">"bob"</span>, <span class="tok-num">42</span>)
+p:<span class="tok-fn">say</span>(<span class="tok-str">"hello"</span>)  <span class="tok-com">-- bob says: hello</span></code></pre>
+    </section>
+
+    <div class="section-head" id="builds">
+      <h2 class="headline-medium">Compiler builds</h2>
+      <md-filled-button id="snack-trigger-2">Download all builds</md-filled-button>
+    </div>
+
+    <section class="card elevated m3-list">
+      <md-list-item type="button">
+        <md-icon slot="start">verified</md-icon>
+        <span slot="headline">Lua 5.1 build</span>
+        <span slot="supporting-text">Primary target — recommended for most projects</span>
+        <span slot="trailing-supporting-text">Latest</span>
+      </md-list-item>
+      <md-list-item type="button">
+        <md-icon slot="start">update</md-icon>
+        <span slot="headline">Lua 5.2 build</span>
+        <span slot="supporting-text">For running Soleil on Lua 5.2</span>
+      </md-list-item>
+      <md-list-item type="button">
+        <md-icon slot="start">update</md-icon>
+        <span slot="headline">Lua 5.3 build</span>
+        <span slot="supporting-text">For running Soleil on Lua 5.3</span>
+      </md-list-item>
+      <md-list-item type="button">
+        <md-icon slot="start">update</md-icon>
+        <span slot="headline">Lua 5.4 build</span>
+        <span slot="supporting-text">For running Soleil on Lua 5.4</span>
+      </md-list-item>
+    </section>
+
+    <md-divider></md-divider>
+
+    <p class="body-medium" style="color:var(--on-surface-variant)">
+      Soleil is an independent dialect of Lua and is not affiliated with the Lua project.
+    </p>
+
+  </main>
+
+  <aside class="toc" aria-label="On this page">
+    <span class="label-large" style="color:var(--on-surface-variant)">ON THIS PAGE</span>
+    <a href="#overview">Overview</a>
+    <a href="#why">Why Soleil?</a>
+    <a href="#syntax">Syntax</a>
+    <a href="#builds">Compiler builds</a>
+  </aside>
+
+</div>
+
+<footer class="footer">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" aria-hidden="true" style="width:24px;height:24px">
+      <circle cx="11" cy="12.5" r="10" fill="none" stroke="currentColor" stroke-width="1" opacity=".4"/>
+      <circle cx="11" cy="12.5" r="7" fill="currentColor"/>
+      <circle cx="18" cy="5.5" r="2.2" fill="currentColor"/>
+      <circle cx="14.4" cy="3.1" r="1.1" fill="currentColor"/>
+    </svg>
+    <span class="title-medium">Soleil</span>
+  </div>
+  <span class="body-small">© 2026 The Soleil Project. A typed, object-oriented dialect of Lua.</span>
+</footer>
+
+<md-fab variant="primary" aria-label="Back to top"><md-icon slot="icon">keyboard_arrow_up</md-icon></md-fab>
+
+<div class="snackbar" id="snackbar" role="status">
+  <span>Compiler build downloaded.</span>
+  <md-text-button class="action">Install</md-text-button>
+</div>
+
+<script src="site.js" defer></script>
+</body>
+</html>

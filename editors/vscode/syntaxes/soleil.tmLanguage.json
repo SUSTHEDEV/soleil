@@ -1,0 +1,120 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "Soleil",
+    "scopeName": "source.soleil",
+    "patterns": [
+        {
+            "include": "#comment"
+        },
+        {
+            "include": "#string"
+        },
+        {
+            "include": "#number"
+        },
+        {
+            "include": "#keyword"
+        },
+        {
+            "include": "#soleil-keyword"
+        },
+        {
+            "include": "#constant"
+        },
+        {
+            "include": "#builtin-type"
+        },
+        {
+            "include": "#builtin-func"
+        },
+        {
+            "include": "#function-call"
+        },
+        {
+            "include": "#operator"
+        }
+    ],
+    "repository": {
+        "comment": {
+            "patterns": [
+                {
+                    "name": "comment.line.double-dash.soleil",
+                    "match": "(--)(?!#!).*$"
+                },
+                {
+                    "name": "comment.block.soleil",
+                    "begin": "--\\[=*\\[",
+                    "end": "\\]=*\\]"
+                }
+            ]
+        },
+        "string": {
+            "patterns": [
+                {
+                    "name": "string.quoted.other.soleil",
+                    "begin": "\\[=*\\[",
+                    "end": "\\]=*\\]"
+                },
+                {
+                    "name": "string.quoted.double.soleil",
+                    "begin": "\"",
+                    "end": "\"",
+                    "patterns": [
+                        {
+                            "name": "constant.character.escape.soleil",
+                            "match": "\\\\."
+                        }
+                    ]
+                },
+                {
+                    "name": "string.quoted.single.soleil",
+                    "begin": "'",
+                    "end": "'",
+                    "patterns": [
+                        {
+                            "name": "constant.character.escape.soleil",
+                            "match": "\\\\."
+                        }
+                    ]
+                }
+            ]
+        },
+        "number": {
+            "name": "constant.numeric.soleil",
+            "match": "\\b(0[xX][0-9a-fA-F]+|\\d+\\.?\\d*[eE][+-]?\\d+|\\.\\d+|\\d+)\\b"
+        },
+        "keyword": {
+            "name": "keyword.control.soleil",
+            "match": "\\b(and|break|do|else|elseif|end|false|for|function|goto|if|in|local|not|or|repeat|return|then|true|until|while)\\b"
+        },
+        "soleil-keyword": {
+            "name": "keyword.declaration.soleil",
+            "match": "\\b(class|interface|data|object|abstract|final|extends|implements|default|override|super|global|protected)\\b"
+        },
+        "constant": {
+            "name": "constant.language.soleil",
+            "match": "\\b(nil|true|false|self)\\b"
+        },
+        "builtin-type": {
+            "name": "support.type.primitive.soleil",
+            "match": "\\b(number|string|boolean|any|unknown|table)\\b"
+        },
+        "builtin-func": {
+            "name": "support.function.builtin.soleil",
+            "match": "\\b(print|pairs|ipairs|type|tostring|tonumber|error|pcall|select|setmetatable|getmetatable)\\b"
+        },
+        "function-call": {
+            "name": "variable.function.soleil",
+            "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*[({\"])",
+            "captures": {
+                "1": {
+                    "name": "variable.function.soleil"
+                }
+            }
+        },
+        "operator": {
+            "name": "keyword.operator.soleil",
+            "match": "(\\?\\.|\\?:|!!|[+\\-*/%^#=~<>])"
+        }
+    }
+}

@@ -1,0 +1,20 @@
+# build artifacts (regenerate with build/build.sh)
+build/soleilc_mono.lua
+build/soleilc.luac
+build/soleilc.lj32
+build/soleilc.lj64
+build/soleilc.jit
+
+# extension build artifacts (regenerate with build/build.sh -e + npm run compile + vsce)
+editors/vscode/server/
+editors/vscode/out/
+editors/vscode/soleil-lsp-*.vsix
+
+# node
+node_modules/
+
+# unused vendored dep (tinytoml — removed with the config module)
+.rocks/
+
+# logs
+*.log

@@ -44,6 +44,8 @@ local soleil_keywords = {
     ["final"] = true,
     ["override"] = true,
     ["default"] = true,
+    ["global"] = true,
+    ["protected"] = true,
     ["data"] = true,
     ["object"] = true,
 }
@@ -87,6 +89,8 @@ local reserved_symbols = {
     ["!!"] = "!!"
 } -- same as above
 
+local parse_diagnostics = {}   -- LSP feed: collected warn/error entries
+
 function laxed_error(message)
     print("Parse Error, but you chose to relax, so here's what's wrong to fix and make it work in standard strict Soleil: " .. message)
 end
@@ -95,6 +99,9 @@ local current_parse_line = 0        -- kept fresh by parse/tokenize for error me
 
 function parse_error(message)
     local at = current_parse_line > 0 and (" at line " .. current_parse_line) or ""
+    parse_diagnostics[#parse_diagnostics + 1] =
+        { severity = "error", message = "Parse Error" .. at .. ": " .. message,
+          line = current_parse_line }
     error("Parse Error" .. at .. ": " .. message)
 end
 
@@ -104,8 +111,28 @@ local function at(node, line)
     return node
 end
 
+function parse_diagnostics_reset()
+    parse_diagnostics = {}
+end
+
+function parse_diagnostics_take()
+    local list = parse_diagnostics
+    parse_diagnostics = {}
+    return list
+end
+
+local parse_quiet = false       -- LSP mode: collect, never print (stdout is the protocol)
+
+function parse_set_quiet(flag)
+    parse_quiet = flag and true or false
+end
+
 function parse_warn(message)
-    print("Parse Warning: " .. message)
+    parse_diagnostics[#parse_diagnostics + 1] =
+        { severity = "warning", message = message }
+    if not parse_quiet then
+        print("Parse Warning: " .. message)
+    end
 end
 
 -- Simple tokenizer
@@ -117,6 +144,7 @@ local function tokenize(input, dialect)
     local cursor = 1
     local tokens = {}
     local line = 1
+    local line_start = 0            -- cursor offset where the current line begins
     local markers = {}
 
     -- shebang: Lua ignores a first line starting with '#'
@@ -127,7 +155,7 @@ local function tokenize(input, dialect)
             markers[#markers + 1] = { line = 1, reason = first_line }
         end
         cursor = nl and (nl + 1) or (#input + 1)
-        if nl then line = line + 1 end
+        if nl then line = line + 1; line_start = nl end
     end
 
     while cursor <= #input do
@@ -136,7 +164,7 @@ local function tokenize(input, dialect)
         
         -- Skip spaces
         if char == " " or char == "\n" or char == "\t" then
-            if char == "\n" then line = line + 1 end
+            if char == "\n" then line = line + 1; line_start = cursor end
             cursor = cursor + 1
         elseif char == "-" and input:sub(cursor, cursor + 1) == "--" then
             -- Skip comments
@@ -175,7 +203,7 @@ local function tokenize(input, dialect)
             end
 
             cursor = cursor + #num
-            table.insert(tokens, { type = "NUMBER", value = num, line = line })
+            table.insert(tokens, { type = "NUMBER", value = num, line = line, col = cursor - line_start + 1 })
         elseif char == "'" or char == '"' then
             -- short string: decode escapes at tokenize time — the token value
             -- is the true string; no downstream stage ever sees a backslash
@@ -221,7 +249,7 @@ local function tokenize(input, dialect)
             table.insert(tokens, {
                 type = "STRING",
                 value = table.concat(parts),
-                line = line
+                line = line, col = cursor - line_start + 1
             })
           -- Backtick-escaped identifiers: `class` — Soleil reserved words as names.
         -- Lua keywords cannot be escaped (they could never emit as valid Lua).
@@ -238,7 +266,7 @@ local function tokenize(input, dialect)
                 type = "IDENTIFIER",
                 value = word,
                 escaped = true,     -- diagnostics/headersgen can tell it apart later
-                line = line
+                line = line, col = cursor - line_start + 1
             })
             cursor = close + 1
         -- Match identifiers and keywords (letters or _)
@@ -253,14 +281,14 @@ local function tokenize(input, dialect)
                 table.insert(tokens, {
                     type = "KEYWORD",
                     value = word,
-                    line = line
-                })
+                    line = line, col = cursor - line_start + 1
+            })
             else
                 table.insert(tokens, {
                     type = "IDENTIFIER",
                     value = word,
-                    line = line
-                })
+                    line = line, col = cursor - line_start + 1
+            })
             end
         -- Handle operators and punctuation
         else
@@ -282,7 +310,7 @@ local function tokenize(input, dialect)
                 if not close then
                     parse_error("unterminated long string")
                 end
-                table.insert(tokens, { type = "STRING", value = input:sub(content_start, close - 1), line = line })
+                table.insert(tokens, { type = "STRING", value = input:sub(content_start, close - 1), line = line, col = cursor - line_start + 1 })
                 local span_start = cursor
                 cursor = close + #close_pat
                 line = line + select(2, input:sub(span_start, cursor - 1):gsub("\n", ""))
@@ -290,7 +318,7 @@ local function tokenize(input, dialect)
                 -- Check for 3-character symbols first
                 local three_char = input:sub(cursor, cursor + 2)
                 if three_char == "..." then
-                    table.insert(tokens, { type = "SYMBOL", value = three_char, line = line })
+                    table.insert(tokens, { type = "SYMBOL", value = three_char, line = line, col = cursor - line_start + 1 })
                     cursor = cursor + 3
                 else
                     -- Then check for 2-character symbols next
@@ -298,16 +326,16 @@ local function tokenize(input, dialect)
                     if reserved_symbols[two_char] then
                         table.insert(tokens, {
                             type = "SYMBOL",
-                            value = two_char
-                        })
+                            value = two_char, col = cursor - line_start + 1
+            })
                         cursor = cursor + 2
                     else
                         -- Then single-character symbols
                         table.insert(tokens, {
                             type = "SYMBOL",
                             value = char,
-                            line = line
-                        })
+                            line = line, col = cursor - line_start + 1
+            })
                         cursor = cursor + 1
                     end
                 end
@@ -338,10 +366,10 @@ function parse(tokens, markers)
             i = i + 1
             -- RAW text, never converted: 10e500 must not become `inf`
             -- (tostring(inf) emits a bare identifier into the output)
-            return ast.Number(token.value)
+            return at(ast.Number(token.value), token.line)
         elseif i <= #tokens and token.type == "STRING" then
             i = i + 1
-            return ast.String(token.value)
+            return at(ast.String(token.value), token.line)
         elseif i <= #tokens and tokens[i].type == "KEYWORD" and tokens[i].value == "function" then
             local saved_fn_depth = fn_depth
             fn_depth = fn_depth + 1
@@ -408,13 +436,13 @@ function parse(tokens, markers)
         elseif i <= #tokens and token.type == "IDENTIFIER" then
             -- calls, method calls, and indexing are postfix now (parse_postfix)
             i = i + 1
-            return ast.Identifier(token.value)
+            return at(ast.Identifier(token.value), token.line)
         elseif i <= #tokens and token.type == "KEYWORD" and (token.value == "true" or token.value == "false") then
             i = i + 1
-            return ast.Boolean(token.value == "true")
+            return at(ast.Boolean(token.value == "true"), token.line)
         elseif i <= #tokens and token.type == "KEYWORD" and token.value == "nil" then
             i = i + 1
-            return ast.Nil()
+            return at(ast.Nil(), token.line)
                 elseif i <= #tokens and token.type == "KEYWORD" and token.value == "super" then
             i = i + 1
             if not current_class_name then
@@ -447,7 +475,7 @@ function parse(tokens, markers)
             return at(ast.Paren(expr), token.line)
         elseif token.type == "SYMBOL" and token.value == "..." then
             i = i + 1
-            return ast.VarArgs()
+            return at(ast.VarArgs(), token.line)
         end
         return nil
     end
@@ -583,7 +611,7 @@ function parse(tokens, markers)
         local left = parse_and(scope)
         while tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "or" do
             local op = tokens[i].value; i = i + 1
-            left = ast.BinaryOp(left, op, parse_and(scope))
+            left = at(ast.BinaryOp(left, op, parse_and(scope)), tokens[i - 1].line)
         end
         return left
     end
@@ -628,7 +656,7 @@ function parse(tokens, markers)
         local left = parse_elvis(scope)
         while tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "and" do
             local op = tokens[i].value; i = i + 1
-            left = ast.BinaryOp(left, op, parse_elvis(scope))
+            left = at(ast.BinaryOp(left, op, parse_elvis(scope)), tokens[i - 1].line)
         end
         return left
     end
@@ -637,7 +665,7 @@ function parse(tokens, markers)
         local left = parse_concat(scope)
         while tokens[i] and tokens[i].type == "SYMBOL" and is_comparison(tokens[i].value) do
             local op = tokens[i].value; i = i + 1
-            left = ast.BinaryOp(left, op, parse_concat(scope))
+            left = at(ast.BinaryOp(left, op, parse_concat(scope)), tokens[i - 1].line)
         end
         return left
     end
@@ -655,7 +683,7 @@ function parse(tokens, markers)
         local left = parse_muldiv(scope)
         while tokens[i] and tokens[i].type == "SYMBOL" and (tokens[i].value == "+" or tokens[i].value == "-") do
             local op = tokens[i].value; i = i + 1
-            left = ast.BinaryOp(left, op, parse_muldiv(scope))
+            left = at(ast.BinaryOp(left, op, parse_muldiv(scope)), tokens[i - 1].line)
         end
         return left
     end
@@ -664,7 +692,7 @@ function parse(tokens, markers)
         local left = parse_unary(scope)
         while tokens[i] and tokens[i].type == "SYMBOL" and (tokens[i].value == "*" or tokens[i].value == "/" or tokens[i].value == "%") do
             local op = tokens[i].value; i = i + 1
-            left = ast.BinaryOp(left, op, parse_unary(scope))
+            left = at(ast.BinaryOp(left, op, parse_unary(scope)), tokens[i - 1].line)
         end
         return left
     end
@@ -672,13 +700,13 @@ function parse(tokens, markers)
     function parse_unary(scope)             -- `- not #`
         if tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "-" then
             local op = tokens[i].value; i = i + 1
-            return ast.UnaryOp(op, parse_unary(scope))
+            return at(ast.UnaryOp(op, parse_unary(scope), tokens[i - 1].line))
         elseif tokens[i] and tokens[i].type == "KEYWORD" and tokens[i].value == "not" then
             local op = tokens[i].value; i = i + 1
-            return ast.UnaryOp(op, parse_unary(scope))
+            return at(ast.UnaryOp(op, parse_unary(scope), tokens[i - 1].line))
         elseif tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "#" then
             local op = tokens[i].value; i = i + 1
-            return ast.UnaryOp(op, parse_unary(scope))
+            return at(ast.UnaryOp(op, parse_unary(scope), tokens[i - 1].line))
         end
         return parse_power(scope)
     end
@@ -751,7 +779,7 @@ function parse(tokens, markers)
                 i = i + 1                       -- skip ']'
                 expr = ast.TableIndex(expr, index)
             elseif t.type == "SYMBOL" and t.value == "(" then
-                expr = ast.FunctionCall(expr, parse_args(scope))
+                expr = at(ast.FunctionCall(expr, parse_args(scope)), t.line)
             elseif t.type == "SYMBOL" and t.value == ":" then
                 i = i + 1
                 if not (i <= #tokens and tokens[i].type == "IDENTIFIER") then
@@ -762,11 +790,11 @@ function parse(tokens, markers)
                 -- method call args: a:b(...) | a:b{...} | a:b"..."
                 local nxt = tokens[i]
                 if nxt and nxt.type == "SYMBOL" and nxt.value == "(" then
-                    expr = ast.MethodCall(expr, ast.Identifier(method_name), parse_args(scope))
+                    expr = at(ast.MethodCall(expr, ast.Identifier(method_name), parse_args(scope)), t.line)
                 elseif nxt and nxt.type == "SYMBOL" and nxt.value == "{" then
-                    expr = ast.MethodCall(expr, ast.Identifier(method_name), { parse_table() })
+                    expr = at(ast.MethodCall(expr, ast.Identifier(method_name), { parse_table() }), t.line)
                 elseif nxt and nxt.type == "STRING" then
-                    expr = ast.MethodCall(expr, ast.Identifier(method_name), { ast.String(nxt.value) })
+                    expr = at(ast.MethodCall(expr, ast.Identifier(method_name), { ast.String(nxt.value) }), t.line)
                     i = i + 1
                 else
                     parse_error("expected '(', '{', or string after method name")
@@ -812,6 +840,7 @@ function parse(tokens, markers)
     function parse_statement(scope, top_level)
         local token = tokens[i]
         if not token then return nil end
+        current_parse_line = token.line or current_parse_line
         
         if token.type == "KEYWORD" and token.value == "local" then
             i = i + 1  -- skip 'local'
@@ -901,6 +930,24 @@ function parse(tokens, markers)
         elseif token.type == "KEYWORD" and token.value == "repeat" then
             return parse_repeat_loop(scope)
         elseif token.type == "IDENTIFIER" then
+            -- annotated declaration: Name : Type = value  (one-token lookahead
+            -- disambiguates from obj:method — same style as the table
+            -- constructor's name=value peek)
+            local n1, n2, n3 = tokens[i + 1], tokens[i + 2], tokens[i + 3]
+            if n1 and n1.type == "SYMBOL" and n1.value == ":"
+                  and n2 and n2.type == "IDENTIFIER"
+                  and n3 and n3.type == "SYMBOL" and n3.value == "=" then
+                local name = ast.Identifier(token.value)
+                i = i + 2                                   -- skip name and ':'
+                local dtype = parse_type()
+                if not (tokens[i] and tokens[i].type == "SYMBOL" and tokens[i].value == "=") then
+                    parse_error("expected '=' after the type in a declaration")
+                end
+                i = i + 1
+                local value = parse_expression(scope)
+                if not value then parse_error("expected value after '='") end
+                return at(ast.Assignment({ name }, { value }, dtype), token.line)
+            end
             return parse_assignment()  -- Handle assignments and function calls
         elseif token.type == "KEYWORD" and token.value == "function" then
             return parse_expression(scope)  -- function expression as a statement
@@ -1034,9 +1081,13 @@ function parse(tokens, markers)
                     form, key, value = "array", ast.Type("number", false), first   -- table[V]: arrays are number-keyed
                 end
             end
-            base = ast.TableType(form, key, value)
+            base = at(ast.TableType(form, key, value), tokens[i - 1].line)   -- line for diagnostics
         elseif t.type == "IDENTIFIER" then
-            base = ast.Type(t.value, false)
+            base = at(ast.Type(t.value, false), tokens[i].line)   -- line for diagnostics
+            i = i + 1
+        elseif t.type == "KEYWORD" and t.value == "nil" then
+            -- nil IS a type (SPEC §2.2): local x : nil, and unions A | B | nil
+            base = at(ast.Type("nil", false), tokens[i].line)
             i = i + 1
         else
             parse_error("expected type name")
@@ -1232,8 +1283,21 @@ function parse(tokens, markers)
         current_class_name = class_name.name
         allow_signature = (kind == "interface") or abstract
         while i <= #tokens and not (tokens[i].type == "KEYWORD" and tokens[i].value == "end") do
+            current_parse_line = tokens[i].line or current_parse_line
             local is_override = false
             local is_default = false
+            -- access modifier: none (default/file), global (public),
+            -- local (private), protected — compile-time enforced
+            local visibility = nil
+            while tokens[i].type == "KEYWORD"
+                  and (tokens[i].value == "global" or tokens[i].value == "local"
+                       or tokens[i].value == "protected") do
+                if visibility then
+                    parse_error("duplicate access modifier")
+                end
+                visibility = tokens[i].value
+                i = i + 1
+            end
             if tokens[i].type == "KEYWORD" and tokens[i].value == "default" then
                 i = i + 1
                 is_default = true
@@ -1245,17 +1309,6 @@ function parse(tokens, markers)
                 i = i + 1
                 is_override = true
             end
-            -- redundant `local` on nested class declarations: warn and continue
-            if tokens[i].type == "KEYWORD" and tokens[i].value == "local"
-                  and tokens[i + 1] and tokens[i + 1].type == "KEYWORD"
-                  and (tokens[i + 1].value == "class" or tokens[i + 1].value == "interface"
-                       or tokens[i + 1].value == "data" or tokens[i + 1].value == "object") then
-                parse_warn("'local' on a " .. tokens[i + 1].value
-                    .. " declaration is redundant — classes are already scope-specific"
-                    .. " (line " .. tostring(tokens[i].line or "?") .. ")")
-                i = i + 1
-            end
-
             -- class-prefix modifiers for NESTED classes (final/abstract before
             -- the class keyword) — distinct from member-level abstract
             local nested_is_final, nested_is_abstract = false, false
@@ -1293,6 +1346,7 @@ local is_nested_class = false
                 end
                 local nested = parse_class(tokens[i].value, nested_is_abstract, scope)
                 if nested_is_final then nested.is_final = true end
+                nested.visibility = visibility
                 nested.nested_in = class_name.name                   -- qualification info
                 table.insert(members, nested)
                 is_nested_class = true
@@ -1309,6 +1363,7 @@ local is_nested_class = false
                 fn.overrides = is_override
                 fn.abstract = is_abstract_member
                 fn.is_default = is_default
+                fn.visibility = visibility
                 if is_default and (not fn.body or #fn.body.statements == 0) then
                     parse_error("default function '" .. fn.name.name
                         .. "' requires a body and a closing 'end'")
@@ -1368,5 +1423,8 @@ end
 
 return {
     tokenize = tokenize,
-    parse = parse
+    parse = parse,
+    parse_set_quiet = parse_set_quiet,
+    parse_diagnostics_reset = parse_diagnostics_reset,
+    parse_diagnostics_take = parse_diagnostics_take
 }

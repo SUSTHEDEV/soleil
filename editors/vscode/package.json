@@ -1,0 +1,140 @@
+{
+  "name": "soleil-lsp",
+  "displayName": "Soleil Language Support",
+  "version": "0.1.0",
+  "publisher": "you",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "activationEvents": [
+    "onLanguage:soleil",
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "soleil",
+        "aliases": [
+          "Soleil"
+        ],
+        "extensions": [
+          ".sol"
+        ],
+        "comments": {
+          "lineComment": "--",
+          "blockComment": [
+            "--[[",
+            "]]"
+          ]
+        },
+        "brackets": [
+          [
+            "(",
+            ")"
+          ],
+          [
+            "[",
+            "]"
+          ],
+          [
+            "{",
+            "}"
+          ]
+        ],
+        "autoClosingPairs": [
+          {
+            "open": "(",
+            "close": ")",
+            "notIn": [
+              "string",
+              "comment"
+            ]
+          },
+          {
+            "open": "[",
+            "close": "]",
+            "notIn": [
+              "string",
+              "comment"
+            ]
+          },
+          {
+            "open": "{",
+            "close": "}",
+            "notIn": [
+              "string",
+              "comment"
+            ]
+          },
+          {
+            "open": "\"",
+            "close": "\"",
+            "notIn": [
+              "string"
+            ]
+          },
+          {
+            "open": "'",
+            "close": "'",
+            "notIn": [
+              "string"
+            ]
+          }
+        ],
+        "surroundingPairs": [
+          [
+            "(",
+            ")"
+          ],
+          [
+            "[",
+            "]"
+          ],
+          [
+            "{",
+            "}"
+          ],
+          [
+            "\"",
+            "\""
+          ],
+          [
+            "'",
+            "'"
+          ]
+        ],
+        "wordPattern": "([a-zA-Z_][a-zA-Z0-9_`]*)",
+        "folding": {
+          "markers": {
+            "start": "^\\s*(class\\b|function\\b|if\\b.*\\bthen\\s*$|for\\b.*\\bdo\\s*$|while\\b.*\\bdo\\s*$|repeat\\b|do\\s*$)",
+            "end": "^\\s*end\\b"
+          }
+        },
+        "indentationRules": {
+          "increaseIndentPattern": "^\\s*(class\\b|function\\b|if\\b.*\\bthen\\s*$|for\\b.*\\bdo\\s*$|while\\b.*\\bdo\\s*$|repeat\\b|do\\s*$|\\bfunction\\s*\\()",
+          "decreaseIndentPattern": "^\\s*(end\\b|else\\b|elseif\\b|until\\b)"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "soleil",
+        "scopeName": "source.soleil",
+        "path": "./syntaxes/soleil.tmLanguage.json"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "^18.0.0",
+    "typescript": "^5.0.0"
+  }
+}

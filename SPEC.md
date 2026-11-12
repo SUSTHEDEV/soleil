@@ -65,43 +65,51 @@ non-finite values are emitted as guarded expressions (`(1/0)`, `(-1/0)`,
   assignable to a plain `T`.
 - Idempotence: `(T?)?` = `T?`.
 
-### 2.3 `any` — table-only, the one trusted channel
+### 2.3 `unknown` — dynamic values, proven before use
 
-- **`any` is legal only inside table brackets**: `table[any]`,
-  `table[K, any]`, `table[any, V]`, and union members *within* those brackets
-  (`table[number | any]`). Everywhere else — parameters, returns, locals,
-  class fields, interface mandates, interface member types, unions outside
-  tables — bare `any` is a compile error.
-- The rule exists because `unknown` removed any need for signature-level
-  `any`: everything flows *into* `unknown`, and `tonumber`/`tostring` are the
-  checkpoints out. Dynamic *signatures* are typed `unknown`; dynamic
-  *collections* are typed with `any` in their brackets.
-- Inside its legal home, `any` is assignable in both directions — it is the
-  one trusted channel, and it is opt-in only: nothing produces `any`
-  implicitly.
+- **Everything flows into `unknown`; nothing flows out without proof.**
+  Checkpoints: `tonumber(u)` → `number?`, `tostring(u)` → `string`, and the
+  type() proof below. Arithmetic/concat on unproven values is an error.
+- **`type(v) == "…"` proves an unknown** (flow narrowing, locals and dotted
+  fields): `"table"` refines to `table[unknown, unknown]` (the recursive-
+  dynamic container — index it, iterate it, prove its elements), `"string"`,
+  `"number"`, `"boolean"`, `"nil"` refine to those primitives. The complement
+  of unknown is unknown — unknown-proofs carry no else-branch shadow.
+- **Dynamic containers are declared with unknown brackets**:
+  `table[string, unknown]`, `table[unknown]`. Writes accept anything; reads
+  come back `unknown?` and must be proven before use. This is the Kotlin
+  `Map<String, Any>` shape, with mandatory narrowing.
+
+### 2.4 `any` — deprecated
+
+- **`any` remains legal only inside table brackets** (`table[any]`,
+  `table[K, any]`, `table[any, V]`, union members within brackets) but emits a
+  **deprecation warning**: declare dynamic tables as
+  `table[K, V]` with `unknown` instead. Outside brackets it is a compile
+  error.
+- `any` was the unchecked channel: reads of an `any`-bracketed table assign
+  in both directions with no proof. `unknown` brackets replace it with
+  checked reads at the cost of one `type()` proof per use.
 - `any` cannot be used as a class name (nominal namespace protection).
-- Standard-library signatures follow the same split: dynamic parameters are
-  `unknown` (`print(v : unknown)`, `tonumber(v : unknown)`), while
-  untyped *containers* stay `table[any]` / `table[any, any]`.
+- Standard-library signatures: dynamic parameters are `unknown`
+  (`print(v : unknown)`, `tonumber(v : unknown)`); untyped containers are
+  `table[unknown]` / `table[unknown, unknown]`.
 
-### 2.4 `unknown` — untyped variadic data
-
-`unknown` is the type of values whose shape the compiler cannot know. The only
-producer is varargs data: `select(n, ...)` spreads unknowns (and a bare `...`
-flows as unknown into `any` positions).
-
-Boundary rules (strict, deliberately diverging from Kotlin platform types):
+**Producers and boundary rules.** The main producer is varargs data:
+`select(n, ...)` spreads unknowns (a bare `...` flows as unknown into
+unknown-typed parameters). Boundary rules — strict, deliberately diverging
+from Kotlin platform types:
 
 | Direction | Rule |
 |---|---|
 | `unknown → unknown` | ok |
-| `unknown → any` | ok |
 | `unknown → T` (any concrete `T`, including `T?`) | **error** |
 | arithmetic / concat on `unknown` | error |
 | `tonumber(u)` | `number?` — checkpoint out |
 | `tostring(u)` | `string` — checkpoint out |
+| `type(u) == "lit"` | proof: narrows per §2.3 |
 
-The rule of thumb: **unknown goes nowhere without a checkpoint or `any`.**
+The rule of thumb: **unknown goes nowhere without a checkpoint or a proof.**
 
 ## 3. Tables
 
@@ -109,7 +117,8 @@ The rule of thumb: **unknown goes nowhere without a checkpoint or `any`.**
 |---|---|---|---|
 | `table[V]` | array — number-keyed | `ipairs` | `#` |
 | `table[K, V]` | map | `pairs` | — |
-| `table[any]` | heterogeneous escape hatch | `pairs` | — |
+| `table[unknown]` / `table[K, unknown]` | dynamic container (reads need proof) | `pairs` | — |
+| `table[any]` | **deprecated** — unchecked reads; warns | `pairs` | — |
 
 Rules:
 
@@ -147,6 +156,11 @@ end
   *may not return values*: `return 42` in a rets-less function is an error
   ("add return types or return nothing"). This is the runtime-honest encoding —
   Lua's no-return, bare `return`, and `return nil` are indistinguishable at runtime.
+- **No implicit any on parameters.** Every parameter must carry a type:
+  `function f(a, b)` is an error ("parameters must be annotated"). Dynamic
+  values are declared `: unknown` and proven before use; concrete types are
+  checked at every call site. Local variables without annotations still infer
+  from their initializer.
 - **Multi-returns are declared comma-separated** and checked per position.
   Call results spread: `local q, m = div(1, 2)`.
 - **Parenthesization truncates.** `(f())` yields exactly one value:
@@ -208,6 +222,11 @@ Rules:
 5. **`extends` takes exactly one class**, with super-constructor arguments in the
    header (`extends Player("", 0)`). Chained constructors run base-first.
    Extending an interface is an error — interfaces are `implemented`.
+   **Super-argument contract (Java-style):** if the base constructor takes
+   parameters, the extends clause *must* pass them — arity is checked in both
+   directions and each argument type-checks against the base's parameter
+   (`class B(y : number) extends A(y)` passes its own parameter through).
+   Extending a parameterless base with arguments is likewise an error.
 6. **Kinds**: `class` (standard), **`data`** (params required, plain aggregate),
    **`object`** (singleton — the name *is* the one instance; top-level only,
    never abstract, no params), **`abstract`** (prefix on classes: not

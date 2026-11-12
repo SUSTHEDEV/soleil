@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # build/build.sh — assemble and compile the soleilc distribution
 #   ./build/build.sh            → build/soleilc.luac      (Lua 5.1 bytecode)
-#   ./build/build.sh -j         → build/soleilc.jit       (LuaJIT bytecode)
-#   ./build/build.sh -j         → build/soleilc.jit      (LuaJIT 32-bit)
-#   ./build/build.sh -J         → build/soleilc.jit      (LuaJIT 64-bit)
+#   ./build/build.sh -j         → build/soleilc.lj32      (LuaJIT 32-bit bytecode)
+#   ./build/build.sh -J         → build/soleilc.lj64      (LuaJIT 64-bit bytecode)
 set -euo pipefail
 
 # location-independent: everything anchors to the repo root,
@@ -24,6 +23,17 @@ build_51() {
     echo "== luac (5.1 bytecode) =="
     luac -o build/soleilc.luac "$MONO"
     echo "   build/soleilc.luac ($(wc -c < build/soleilc.luac) bytes)"
+}
+
+build_extension() {
+    echo "== vscode extension server tree =="
+    local dest="editors/vscode/server"
+    rm -rf "$dest"
+    mkdir -p "$dest/lsp"
+    cp main.lua "$dest/"
+    cp -r parser ast checker codegen helpers "$dest/"
+    cp lsp/server.lua lsp/json.lua "$dest/lsp/"
+    echo "   $dest ($(find "$dest" -name '*.lua' | wc -l) lua files)"
 }
 
 build_jit() {
@@ -54,12 +64,16 @@ while [[ $# -gt 0 ]]; do
     -l | --lua51)
             build_51
             ;;
+    -e | --extension)
+            build_extension
+            ;;
     -h | --help)
             echo "usage: build/build.sh [-l] [-j] [-J]"
             echo "  (no flags)  build/soleilc.luac   — Lua 5.1 bytecode"
             echo "  -l          build/soleilc.luac   — Lua 5.1, explicit"
-            echo "  -j          build/soleilc.jit    — LuaJIT 32-bit (-bW)"
-            echo "  -J          build/soleilc.jit    — LuaJIT 64-bit (-bX)"
+            echo "  -e          editors/vscode/server — extension server tree"
+            echo "  -j          build/soleilc.lj32   — LuaJIT 32-bit (-bW)"
+            echo "  -J          build/soleilc.lj64   — LuaJIT 64-bit (-bX)"
             exit 0
             ;;
     -J | --luajit_64)

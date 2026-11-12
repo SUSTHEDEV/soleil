@@ -57,7 +57,7 @@ local valid = {
   "local t = {}\nfor k, v in pairs(t) do end",
   -- functions parse & declare (call checking is Step 3)
   "local f = function(x : number) : number return x end",
-  "function g(a, b : string) end",
+  "function g(a : number, b : string) end",
   -- Step 3: call checking end-to-end
   "local f = function(x : number) : number return x end\nlocal n : number = f(1)",
   "local f = function(x : number?) : number? return x end\nf()",
@@ -83,7 +83,7 @@ local valid = {
   "abstract class Animal\n    abstract function speak(self : Animal) : string\nend",
   "abstract class Animal\n    function breathe(self : Animal) print(1) end\nend",
   "abstract class Animal\n    abstract function speak(self : Animal) : string\n    function breathe(self : Animal) print(1) end\nend",
-  "abstract class Animal\n    abstract function speak(self : Animal) : string\nend\nclass Dog extends Animal(\"woof\")\n    override function speak(self : Dog) : string return \"woof\" end\nend",
+  "abstract class Animal(sound : string)\n    abstract function speak(self : Animal) : string\nend\nclass Dog extends Animal(\"woof\")\n    override function speak(self : Dog) : string return \"woof\" end\nend",
   "abstract class A\n    abstract function f(self : A) : string\nend\nclass Plain function g(self : Plain) end end\nlocal ok : string = \"clean\"",
   -- rule 2: self covariance (narrow ok, same-type ok)
   "class Player(name : string?) function say(self : Player) end end\nclass A extends Player(\"\") override function say(self : A) end end",
@@ -95,7 +95,7 @@ local valid = {
   "class Player(name : string?, id : number) function say(self : Player, msg : string) print(msg) end end\nlocal p : Player = Player(\"bob\", 42)\np:say(\"hi\")\nlocal n : number = p.id",
   "class Player(name : string?, id : number) function say(self : Player, msg : string) print(msg) end end\nlocal p : Player? = nil",
   "data Pair(a : number, b : number) end",
-  "object Counter function inc(self, x : number) : number return x end end",
+  "object Counter function inc(self : Counter, x : number) : number return x end end",
   "interface Shape(name : string)\n    function area(self : Shape) : number\nend\nclass Circle(x : number, name : string) implements Shape\n    function area(self : Circle) : number return 42 end\nend",
   -- inheritance + rule 7 + super
   "class Player(name : string?) function say(self : Player) end end\nclass A extends Player(\"\") override function say(self : A) end end",
@@ -105,7 +105,7 @@ local valid = {
   "function h() : number, string return 1, \"a\" end\nlocal n : number = h()",
   "local f = function() : number, string return 1, \"a\" end\nlocal n : number = f()",
   "interface I\n    function area(self : I) : number\nend\nclass C implements I\n    function area(self : C) : number return 1 end\nend",
-  "class B(x : number) function two(self : B) : number, string return 1, \"s\" end end\nclass A extends B(x)\n    override function two(self : A) : number, string return 1, \"s\" end\nend",
+  "class B(x : number) function two(self : B) : number, string return 1, \"s\" end end\nclass A(x : number) extends B(x)\n    override function two(self : A) : number, string return 1, \"s\" end\nend",
   -- call-ret propagation
   "function get() : number, string return 1, \"a\" end\nfunction f2() : number, string return get() end",
   "function f() : number, string return 1, \"a\" end\nlocal a, b = f()\nlocal s : string = b",
@@ -182,6 +182,29 @@ local valid = {
   -- final classes
   "final class Seal(x : number)\n    function who(self : Seal) : string return \"s\" end\nend\n"
     .. "local s = Seal(1)\nlocal w : string = s:who()",
+  "class A(x : number) end\nclass B(y : number) extends A(y) end",
+  -- annotated declarations: Name : Type = value (typed globals + redeclaration checks)
+  "android: number = 4\nlocal n : number = android",
+  "android: number = 4\nandroid: number = 5",
+  "local s = \"x\"\nprint(s:upper())",
+  -- access modifiers (SPEC: none/global/local/protected)
+  "class Vault(secret : string)\n    local function peek(self : Vault) : string return self.secret end\n"
+    .. "    function open(self : Vault) : string return self:peek() end\nend\n"
+    .. "local v = Vault(\"gold\")\nlocal s : string = v:open()",
+  "class Vault(secret : string)\n    protected function peek(self : Vault) : string return self.secret end\nend\n"
+    .. "class Strong extends Vault(\"x\")\n    function steal(self : Strong) : string return self:peek() end\nend",
+  "class Outer\n    local class Secret(x : number)\n        function v(self : Secret) : number return self.x end\n    end\n"
+    .. "    function get(self : Outer) : number return Outer.Secret(9):v() end\nend\n"
+    .. "local n : number = Outer():get()",
+  -- `any` deprecation era: unknown brackets + type() proofs
+  "local t : table[string, unknown] = { a = 1, b = \"x\" }\nlocal v = t.a",
+  "local t : table[string, unknown] = { n = 5 }\nlocal v = t.n\nlocal s : string = tostring(v)",
+  "local t : table[string, unknown] = { sub = { x = 1 } }\n"
+    .. "local u = t.sub\nif type(u) == \"table\" then\n    print(u.x)\nend",
+  "local t : table[string, unknown] = { n = 5 }\nlocal v = t.n\n"
+    .. "if type(v) == \"number\" then\n    print(v + 1)\nend",
+  "local m : table[string, unknown] = { a = 1 }\nfor k, v in pairs(m) do print(k) end",
+  "local t : table[any] = { 1, \"x\" }",          -- legacy: legal, warns
   -- nested final/abstract class declarations
   "class Outer\n    final class Seal(x : number)\n        function v(self : Seal) : number return self.x end\n    end\nend",
   "class Outer\n    abstract class Base(x : number)\n        abstract function go(self : Base) : number\n    end\nend",
@@ -297,8 +320,9 @@ local invalid = {
   { "local function f()\n    class Q(x : number) end\n    class Q(y : number) end\n    return Q(1)\nend", "duplicate class name" },
   { "local function f() : unknown\n    class Q(x : number) end\n    return Q\nend", "as a value" },
   { "local u : unknown = 1\nlocal n : number = u", "expected a compatible type" },
-  { "local a : any = 1", "only legal inside table types" },
-  { "class A(x : number) end\nclass B extends A\n    function f(self : B) : number return super.nope(self) end\nend", "no method" },
+  { "local t : table[string, unknown] = { n = 5 }\nlocal v = t.n\nprint(v + 1)", "needs numbers" },
+  { "local a : any = 1", "`any` is deprecated" },
+  { "class A(x : number) end\nclass B extends A(0)\n    function f(self : B) : number return super.nope(self) end\nend", "no method" },
   -- interface v2: mandate + implements violations
   { "interface A(x : string) end\ninterface B(x : number) end\n"
     .. "class C(x : string) implements A, B end", "must accept" },
@@ -313,6 +337,23 @@ local invalid = {
   -- final classes
   { "final class Seal(x : number) end\nclass Sub extends Seal end", "cannot extend final class" },
   { "class Outer\n    final class Seal(x : number) end\nend\nlocal o = Outer.Nope(1)", "no nested class or method 'Nope'" },
+  -- annotated declarations
+  { "android: number = \"x\"", "cannot initialize" },
+  { "android: number = 4\nandroid = \"x\"", "cannot assign" },
+  { "android: number = 4\nandroid: string = \"s\"", "incompatible type" },
+  -- access modifiers
+  { "class Vault(secret : string)\n    local function peek(self : Vault) : string return self.secret end\nend\n"
+    .. "local v = Vault(\"gold\")\nprint(v:peek())", "is local" },
+  { "class Vault(secret : string)\n    local function peek(self : Vault) : string return self.secret end\nend\n"
+    .. "class Strong extends Vault(\"x\")\n    function steal(self : Strong) : string return self:peek() end\nend", "is local" },
+  { "class Vault(secret : string)\n    protected function peek(self : Vault) : string return self.secret end\nend\n"
+    .. "local v = Vault(\"gold\")\nprint(v:peek())", "is protected" },
+  { "class Outer\n    local class Secret(x : number) end\nend\nlocal s = Outer.Secret(1)", "is local" },
+  -- super-argument contract (Java-style)
+  { "class A(x : number) end\nclass B extends A end", "must pass constructor arguments" },
+  { "class A(x : number, y : string) end\nclass B extends A(1) end", "expects 2 constructor argument(s), got 1" },
+  { "class A end\nclass B extends A(1) end", "expects 0 constructor argument(s), got 1" },
+  { "class A(x : number) end\nclass B extends A(\"s\") end", "super constructor argument 1 type mismatch" },
   -- narrowing soundness
   { "local function f(x : number | string) : string\n"
     .. "    if type(x) == \"number\" then return x .. \"!\" end\n"

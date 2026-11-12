@@ -42,6 +42,15 @@ local function current_class(scope)
     return nil
 end
 
+local function class_chain(scope)                 -- all enclosing classes, nearest first
+    local chain, s = {}, scope
+    while s do
+        if s.current_class_type then chain[#chain + 1] = s.current_class_type end
+        s = s.parent
+    end
+    return chain
+end
+
 local function find_member(ct, table_name, member_name)
     local c = ct
     while c do
@@ -216,6 +225,8 @@ end
 --    canonical representation decided for nullability.
 -- ===========================================================================
 local class_registry = {}
+local checker_warn             -- defined with type_error; used by from_ast warns
+local type_error               -- from_ast's unknown-type errors carry node lines
 local qname_taken = {}       -- unique flat names for emitted classes
 
 local function from_ast(node, scope, any_ok)
@@ -225,14 +236,21 @@ local function from_ast(node, scope, any_ok)
         local base
         if name == "number" or name == "string" or name == "boolean"
            or name == "nil" or name == "any" or name == "unknown" then
-            if name == "any" and not any_ok then
-                error("any is only legal inside table types — use unknown for dynamic data")
+            if name == "any" then
+                if not any_ok then
+                    type_error("`any` is deprecated — declare dynamic tables as"
+                        .. " table[K, V] with unknown, and route dynamic values"
+                        .. " through unknown", node)
+                end
+                checker_warn("`any` is deprecated — declare this table as"
+                    .. " table[K, V] with unknown instead", node)
             end
             base = prim(name)
         else
             local ct = lookup(scope, name)        -- classes resolve through scopes now
             if not ct then
-                error("unknown type '" .. name .. "'")
+                type_error("unknown type '" .. name .. "'"
+                    .. (name == "int" and " — did you mean 'number'?" or ""), node)
             end
             base = ct
         end
@@ -242,8 +260,24 @@ local function from_ast(node, scope, any_ok)
         return base
     elseif node.type == "TableType" then
         -- the brackets are any's one legal home
+        local kt = from_ast(node.key, scope, true)
+        -- keys cannot be nil: Lua throws on t[nil] = v, so a nullable key
+        -- declares an unsatisfiable contract — rejected at the declaration
+        if kt.kind == "primitive" and kt.name == "nil" then
+            type_error("table keys cannot be nil — remove the nullability"
+                .. " from the key type", node)
+        end
+        if kt.kind == "union" and has_nil_member(kt) then
+            type_error("table keys cannot be nullable — nil is not a storable"
+                .. " key (declare the key without '?')", node)
+        end
+        -- boolean is the only finite primitive: 2 storable keys, ever
+        if kt.kind == "primitive" and kt.name == "boolean" then
+            checker_warn("boolean-keyed tables hold at most two entries —"
+                .. " prefer two nullable fields or a class", node)
+        end
         return { kind = "table", form = node.form,
-                 key = from_ast(node.key, scope, true),
+                 key = kt,
                  value = from_ast(node.value, scope, true) }
     elseif node.type == "UnionType" then
         local members = {}
@@ -333,10 +367,54 @@ end
 local check_stmt, infer_expr  -- mutually recursive
 local check_stmt_raw          -- depth-capped body of check_stmt
 
-local function type_error(msg, node)
+local check_diagnostics = nil   -- set by check_diagnostics(): LSP feed mode
+
+checker_warn = function(msg, node)
+    local where = ""
+    if node and node.line then where = " (line " .. node.line .. ")" end
+    if check_diagnostics then
+        check_diagnostics[#check_diagnostics + 1] =
+            { severity = "warning", message = msg .. where, line = node and node.line }
+    end
+    parse_warn(msg .. where)
+end
+
+local check_diagnostics_handled = false
+
+type_error = function(msg, node)
     local where = ""
     if node and node.line then where = " at line " .. node.line end
+    if check_diagnostics then
+        check_diagnostics[#check_diagnostics + 1] =
+            { severity = "error", message = msg .. where, line = node and node.line }
+        check_diagnostics_handled = true
+    end
     error("type error" .. where .. ": " .. msg)
+end
+
+-- access-modifier enforcement. accessing = the class chain enclosing the
+-- access site; declaring = the class owning the member.
+--   local (private): declaring class (or a class nested inside it)
+--   protected:       declaring class or any of its subclasses
+--   none/global:     unrestricted
+local function visibility_ok(accessing_chain, declaring, vis)
+    if not vis or vis == "global" then return true end
+    if not accessing_chain then return false end
+    local in_declaring = false
+    for _, c in ipairs(accessing_chain) do
+        if c == declaring then in_declaring = true end
+    end
+    if vis == "local" then return in_declaring end
+    if vis == "protected" then
+        if in_declaring then return true end
+        local c = accessing_chain[1]                 -- nearest enclosing class
+        while c do
+            if c == declaring then return true end
+            c = c.base_class
+        end
+        return false
+    end
+    return true
 end
 
 local function check_fn_body(node, fn_type, parent_scope)
@@ -349,6 +427,11 @@ local function check_fn_body(node, fn_type, parent_scope)
     local fn_scope = new_scope(parent_scope, false, fn_type.rets)
     for _, p in ipairs(node.parameters) do
         if p.type == "Param" then
+            if not p.param_type then
+                type_error("parameter '" .. p.name.name
+                    .. "' has no type — parameters must be annotated"
+                    .. " (use : unknown for dynamic values)", p)
+            end
             local pt = p.param_type and from_ast(p.param_type, parent_scope) or T_ANY
             fn_type.params[#fn_type.params + 1] = pt
             declare(fn_scope, p.name.name, pt)
@@ -420,6 +503,46 @@ infer_expr = function(node, scope, allow_type)
     end
 
     if kind == "BinaryOp" then
+        -- type(x) == number  →  the Kotlin-is habit: comparisons are against
+        -- a STRING, and a bare primitive name is not a value
+        if node.operator == "==" or node.operator == "~=" then
+            local call, bare, nil_side
+            if node.left.type == "FunctionCall" and node.left.func.type == "Identifier"
+                  and node.left.func.name == "type" then
+                call = node.left
+                if node.right.type == "Identifier" then bare = node.right.name end
+                if node.right.type == "Nil" then nil_side = true end
+            elseif node.right.type == "FunctionCall" and node.right.func.type == "Identifier"
+                  and node.right.func.name == "type" then
+                call = node.right
+                if node.left.type == "Identifier" then bare = node.left.name end
+                if node.left.type == "Nil" then nil_side = true end
+            end
+            if call and bare then
+                local bound = lookup(scope, bare)
+                local prims = { number = true, string = true, boolean = true,
+                                table = true, ["nil"] = true }
+                -- two ways to get this wrong: bare primitives are undefined
+                -- (`number`), and stdlib namespaces are records (`string`,
+                -- `table`). Comparing a type() result against either is
+                -- always-false dead code.
+                local is_unbound_primitive = (not bound) and prims[bare]
+                local is_stdlib_namespace = bound and bound.kind == "record"
+                if is_unbound_primitive or is_stdlib_namespace then
+                    type_error("type comparisons use a string — write type("
+                        .. call.arguments[1].name .. ") == \"" .. bare .. "\""
+                        .. " (a bare '" .. bare .. "' is not a type value)", node)
+                end
+            end
+            -- type(x) == nil is ALWAYS false: type() returns a string, and a
+            -- string is never nil. The intent is almost certainly the value
+            -- check `x == nil`.
+            if call and nil_side then
+                type_error("a type() result is never nil — this comparison is"
+                    .. " always false; did you mean `" .. call.arguments[1].name
+                    .. " == nil`?", node)
+            end
+        end
         local lt = infer_expr(node.left, scope)
         local rt = infer_expr(node.right, scope)
         local op = node.operator
@@ -488,6 +611,14 @@ infer_expr = function(node, scope, allow_type)
             local bt = owner and owner.vars[root_name]
             if bt and bt.kind == "class"
                   and owner.type_bindings and owner.type_bindings[root_name] then
+                -- the ROOT class itself may be private/protected: accessing
+                -- Outer.Seal from outside Outer requires Outer-visible access
+                local chain = class_chain(scope)
+                if bt.visibility and bt.visibility ~= "global"
+                      and not visibility_ok(chain, bt, bt.visibility) then
+                    type_error("class '" .. bt.name .. "' is " .. bt.visibility
+                        .. " — not accessible here", node)
+                end
                 local parts = {}
                 for part in lvalue_key(node):gmatch("[^.]+") do
                     parts[#parts + 1] = part
@@ -496,6 +627,11 @@ infer_expr = function(node, scope, allow_type)
                 for i = 2, #parts do
                     local nm = parts[i]
                     local nested = cur.nested and cur.nested[nm]
+                    if nested and nested.visibility and nested.visibility ~= "global"
+                          and not visibility_ok(chain, cur, nested.visibility) then
+                        type_error("class '" .. nested.name .. "' is "
+                            .. nested.visibility .. " — not accessible here", node)
+                    end
                     if i == #parts and not nested then
                         -- final segment may be a MEMBER (nearest ancestor wins)
                         local c, mem = cur, nil
@@ -531,6 +667,13 @@ infer_expr = function(node, scope, allow_type)
         end
         -- §3: reads of tables yield the value type WRAPPED NULLABLE
         local t = infer_expr(node.table, scope)
+        if t and t.kind == "table" and node.via_dot then
+            -- m.a implicitly keys with the STRING "a" — string must flow into K
+            if not compatible(T_STRING, t.key) then
+                type_error("dot access requires string keys (table keys are "
+                    .. describe(t.key) .. ")", node)
+            end
+        end
         if not node.via_dot then
             infer_expr(node.index, scope)   -- t[k]: the index is a real expression
         end                                  -- t.k: the index is a literal key name
@@ -653,22 +796,31 @@ infer_expr = function(node, scope, allow_type)
             mt = mt.value                        -- method = the value stored under the key
         end
         if obj_t.kind == "class" then
-            local c, m = obj_t, nil
+            local c, m, declaring = obj_t, nil, nil
             while c do                                  -- walk the extends chain
                 m = c.methods[node.method_name.name]
-                if m then break end
+                if m then declaring = c break end
                 c = c.base_class
             end
             if not m and obj_t.implements then
                 -- interface v2 defaults: the method may live on an interface
                 for _, iface in ipairs(obj_t.implements) do
                     m = iface.methods[node.method_name.name]
-                    if m then break end
+                    if m then declaring = iface break end
                 end
             end
             if not m then
                 type_error("no such method '" .. node.method_name.name
                     .. "' in class '" .. obj_t.name .. "'", node)
+            end
+            -- access-modifier enforcement
+            if declaring and m.visibility and m.visibility ~= "global" then
+                local chain = class_chain(scope)
+                if not visibility_ok(chain, declaring, m.visibility) then
+                    type_error("member '" .. node.method_name.name .. "' of class '"
+                        .. declaring.name .. "' is " .. m.visibility
+                        .. " — not accessible here", node)
+                end
             end
             -- devirtualization stamp: the nearest CLASS providing the method
             -- (interfaces are contracts; the emitter needs a concrete owner).
@@ -872,6 +1024,10 @@ infer_expr = function(node, scope, allow_type)
                 return union({ f, T_NIL })
             end
             if obj_t.kind == "table" then
+                if not compatible(T_STRING, obj_t.key) then
+                    type_error("dot access requires string keys (table keys are "
+                        .. describe(obj_t.key) .. ")", node)
+                end
                 infer_expr(acc.index, scope)
                 return union({ obj_t.value, T_NIL })
             end
@@ -968,13 +1124,22 @@ infer_expr = function(node, scope, allow_type)
         end
         local m = nil
         local c = base
+        local declaring = nil
         while c do                                       -- nearest ancestor wins
             m = c.methods[node.method_name.name]
-            if m then break end
+            if m then declaring = c break end
             c = c.base_class
         end
         if not m then
             type_error("no method '" .. node.method_name.name .. "' to call via super", node)
+        end
+        if declaring and m.visibility == "local" then
+            local chain = class_chain(scope)
+            if not visibility_ok(chain, declaring, "local") then
+                type_error("member '" .. node.method_name.name .. "' of class '"
+                    .. declaring.name .. "' is local (private) — not accessible"
+                    .. " via super from '" .. current_class(scope).name .. "'", node)
+            end
         end
         -- self is EXPLICIT in super calls: args map params[1..], no +1 skip
         if not m.varargs and #node.arguments ~= #m.params then
@@ -1066,6 +1231,34 @@ check_stmt_raw = function(node, scope)
     end
 
     if kind == "Assignment" then
+        -- Name : Type = value — an annotated declaration: declares the name
+        -- (into the current scope) with the annotated type, or checks against
+        -- an existing declaration. Globals declare themselves here: this is
+        -- the only way a global comes into existence.
+        if node.value_type then
+            local dt = from_ast(node.value_type, scope)
+            for i, target in ipairs(node.variables) do
+                if target.type ~= "Identifier" then
+                    type_error("cannot declare a non-identifier", target)
+                end
+                local existing = lookup(scope, target.name)
+                local vt = node.values[i] and infer_expr(node.values[i], scope)
+                if vt and not compatible(vt, dt) then
+                    type_error("cannot initialize '" .. target.name
+                        .. "': expected " .. describe(dt) .. ", got "
+                        .. describe(vt), node)
+                end
+                if existing then
+                    if not compatible(dt, existing) then
+                        type_error("re-declaring '" .. target.name
+                            .. "' with an incompatible type", node)
+                    end
+                else
+                    declare(scope, target.name, dt)
+                end
+            end
+            return
+        end
         if #node.values == 1 then
             local spread = call_rets(node.values[1], scope)
             if spread then
@@ -1080,8 +1273,22 @@ check_stmt_raw = function(node, scope)
                         end
                     elseif target.type == "TableIndex" then
                         local tt = infer_expr(target.table, scope)
-                        if tt and tt.kind == "table" and not compatible(t, tt.value) then
-                            type_error("cannot store this value in the table", node)
+                        if tt and tt.kind == "table" then
+                            if target.via_dot then
+                                if not compatible(T_STRING, tt.key) then
+                                    type_error("dot access requires string keys (table keys are "
+                                        .. describe(tt.key) .. ")", node)
+                                end
+                            else
+                                local kt = infer_expr(target.index, scope)
+                                if kt and not compatible(kt, tt.key) then
+                                    type_error("key type mismatch — table keys are "
+                                        .. (tt.key and (tt.key.kind == "primitive" and tt.key.name or "table") or "?"), node)
+                                end
+                            end
+                            if not compatible(t, tt.value) then
+                                type_error("cannot store this value in the table", node)
+                            end
                         end
                     end
                 end
@@ -1109,6 +1316,20 @@ check_stmt_raw = function(node, scope)
                             .. tt.name .. "'", node)
                     end
                 elseif tt and tt.kind == "table" and vt then
+                    -- keys are checked too: the write must respect K and V
+                    if target.via_dot then
+                        -- m.a implicitly keys with the STRING "a"
+                        if not compatible(T_STRING, tt.key) then
+                            type_error("dot access requires string keys (table keys are "
+                                .. describe(tt.key) .. ")", node)
+                        end
+                    else
+                        local kt = infer_expr(target.index, scope)
+                        if kt and not compatible(kt, tt.key) then
+                            type_error("key type mismatch — table keys are "
+                                .. (tt.key and (tt.key.kind == "primitive" and tt.key.name or "table") or "?"), node)
+                        end
+                    end
                     if not compatible(vt, tt.value) then
                         type_error("cannot store this value in the table", node)
                     end
@@ -1172,79 +1393,129 @@ check_stmt_raw = function(node, scope)
             return walk(block)
         end
 
-        -- extract the narrowed lvalue (var or dotted field) + per-branch types
-        local narrow_key, narrow_is_var, then_t, else_t
-        if cond.type == "BinaryOp" and (cond.operator == "~=" or cond.operator == "==") then
-            local lv = nil
-            if cond.left.type == "Identifier" or cond.left.type == "TableIndex" then
-                lv = cond.left
-            elseif cond.right.type == "Identifier" or cond.right.type == "TableIndex" then
-                lv = cond.right
-            end
-            if lv and (cond.right.type == "Nil" or cond.left.type == "Nil") then
-                local key = lvalue_key(lv)
-                if key then
-                    local t = infer_expr(lv, scope)
-                    local notnil = strip_nil(t)
-                    narrow_key, narrow_is_var = key, lv.type == "Identifier"
-                    if cond.operator == "~=" then
-                        then_t, else_t = notnil, T_NIL        -- else: x IS nil
-                    else
-                        then_t, else_t = T_NIL, notnil        -- then: x IS nil
-                    end
-                end
+        -- flow narrowing over a CONJUNCTION: each `and`-linked check narrows
+        -- independently in the then-block. else-branch shadows apply only for
+        -- a single condition — the negation of an `and` chain leaves every
+        -- variable ambiguous. Assignments inside a branch cancel their shadow.
+        local conjuncts = {}
+        local function split_and(c)
+            if c.type == "BinaryOp" and c.operator == "and" then
+                split_and(c.left)
+                split_and(c.right)
+            else
+                conjuncts[#conjuncts + 1] = c
             end
         end
-        if not narrow_key and cond.type == "BinaryOp"
-              and (cond.operator == "==" or cond.operator == "~=") then
-            local call, lit
-            if cond.left.type == "FunctionCall" and cond.left.func.type == "Identifier"
-                  and cond.left.func.name == "type" and #cond.left.arguments == 1
-                  and cond.right.type == "String" then
-                call, lit = cond.left, cond.right.value
-            elseif cond.right.type == "FunctionCall" and cond.right.func.type == "Identifier"
-                  and cond.right.func.name == "type" and #cond.right.arguments == 1
-                  and cond.left.type == "String" then
-                call, lit = cond.right, cond.left.value
-            end
-            if call then
-                local lv = call.arguments[1]
-                local key = lvalue_key(lv)
-                if key then
-                    local t = infer_expr(lv, scope)
-                    if t and t.kind == "union" then
-                        local yes, no = {}, {}
-                        for _, mem in ipairs(t.members) do
-                            if mem.kind == "primitive" and mem.name == lit then
-                                yes[#yes + 1] = mem
-                            else
-                                no[#no + 1] = mem
-                            end
-                        end
-                        if #yes > 0 then
-                            narrow_key, narrow_is_var = key, lv.type == "Identifier"
-                            then_t = (#yes == 1) and yes[1] or union(yes)
-                            else_t = (#no == 1) and no[1] or ((#no > 1) and union(no) or T_NIL)
+        split_and(cond)
+
+        local proof = {
+            ["string"]  = prim("string"),
+            ["number"]  = prim("number"),
+            ["boolean"] = prim("boolean"),
+            ["nil"]     = T_NIL,
+            ["table"]   = { kind = "table", form = "map",
+                            key = prim("unknown"), value = prim("unknown") },
+        }
+
+        local narrows = {}   -- { key, is_var, then_t, else_t } per conjunct
+        for _, part in ipairs(conjuncts) do
+            local narrow_key, narrow_is_var, then_t, else_t
+
+            if part.type == "BinaryOp" and (part.operator == "~=" or part.operator == "==") then
+                local lv = nil
+                if part.left.type == "Identifier" or part.left.type == "TableIndex" then
+                    lv = part.left
+                elseif part.right.type == "Identifier" or part.right.type == "TableIndex" then
+                    lv = part.right
+                end
+                if lv and (part.right.type == "Nil" or part.left.type == "Nil") then
+                    local key = lvalue_key(lv)
+                    if key then
+                        local t = infer_expr(lv, scope)
+                        local notnil = strip_nil(t)
+                        narrow_key, narrow_is_var = key, lv.type == "Identifier"
+                        if part.operator == "~=" then
+                            then_t, else_t = notnil, T_NIL        -- else: x IS nil
+                        else
+                            then_t, else_t = T_NIL, notnil        -- then: x IS nil
                         end
                     end
                 end
+            end
+
+            if not narrow_key and part.type == "BinaryOp"
+                  and (part.operator == "==" or part.operator == "~=") then
+                local call, lit
+                if part.left.type == "FunctionCall" and part.left.func.type == "Identifier"
+                      and part.left.func.name == "type" and #part.left.arguments == 1
+                      and part.right.type == "String" then
+                    call, lit = part.left, part.right.value
+                elseif part.right.type == "FunctionCall" and part.right.func.type == "Identifier"
+                      and part.right.func.name == "type" and #part.right.arguments == 1
+                      and part.left.type == "String" then
+                    call, lit = part.right, part.left.value
+                end
+                if call then
+                    local lv = call.arguments[1]
+                    local key = lvalue_key(lv)
+                    if key then
+                        local t = infer_expr(lv, scope)
+                        -- the Kotlin-Any proof step for unknown values:
+                        -- table -> table[unknown, unknown] (recursive-dynamic),
+                        -- primitives -> themselves. The complement of unknown
+                        -- is unknown: unknown-proofs carry no else shadow.
+                        if t and t.kind == "union" then
+                            local yes, no, has_unknown = {}, {}, false
+                            for _, mem in ipairs(t.members) do
+                                if mem.kind == "primitive" and mem.name == lit then
+                                    yes[#yes + 1] = mem
+                                elseif mem.kind == "primitive" and mem.name == "unknown" then
+                                    has_unknown = true
+                                else
+                                    no[#no + 1] = mem
+                                end
+                            end
+                            if #yes > 0 then
+                                narrow_key, narrow_is_var = key, lv.type == "Identifier"
+                                then_t = (#yes == 1) and yes[1] or union(yes)
+                                else_t = (#no == 1) and no[1] or ((#no > 1) and union(no) or T_NIL)
+                            elseif has_unknown and proof[lit] then
+                                narrow_key, narrow_is_var = key, lv.type == "Identifier"
+                                then_t = proof[lit]
+                            end
+                        elseif t and t.kind == "primitive" and t.name == "unknown" then
+                            if proof[lit] then
+                                narrow_key, narrow_is_var = key, lv.type == "Identifier"
+                                then_t = proof[lit]
+                            end
+                        end
+                    end
+                end
+            end
+
+            if narrow_key then
+                narrows[#narrows + 1] = {
+                    key = narrow_key, is_var = narrow_is_var,
+                    then_t = then_t, else_t = else_t,
+                }
             end
         end
 
-        local function branch_shadow(target_scope, t)
-            if not narrow_key or not t then return end
-            if narrow_is_var then
-                local t0 = lookup(target_scope, narrow_key)
-                if t0 ~= t then declare(target_scope, narrow_key, t) end
+        local function apply_shadow(target_scope, nr)
+            if nr.is_var then
+                local t0 = lookup(target_scope, nr.key)
+                if t0 ~= nr.then_t then declare(target_scope, nr.key, nr.then_t) end
             else
                 target_scope.field_narrows = target_scope.field_narrows or {}
-                target_scope.field_narrows[narrow_key] = t
+                target_scope.field_narrows[nr.key] = nr.then_t
             end
         end
 
         local then_scope = new_scope(scope)
-        if narrow_key and not assigns_key(node.thenBlock, narrow_key) then
-            branch_shadow(then_scope, then_t)
+        for _, nr in ipairs(narrows) do
+            if not assigns_key(node.thenBlock, nr.key) then
+                apply_shadow(then_scope, nr)
+            end
         end
         for _, s in ipairs(node.thenBlock.statements) do
             check_stmt(s, then_scope)
@@ -1252,8 +1523,12 @@ check_stmt_raw = function(node, scope)
         if node.elseBlock then
             if node.elseBlock.type == "Block" then
                 local else_scope = new_scope(scope)
-                if narrow_key and not assigns_key(node.elseBlock, narrow_key) then
-                    branch_shadow(else_scope, else_t)
+                if #narrows == 1 then
+                    local nr = narrows[1]
+                    local else_only = { key = nr.key, is_var = nr.is_var, then_t = nr.else_t }
+                    if not assigns_key(node.elseBlock, nr.key) then
+                        apply_shadow(else_scope, else_only)
+                    end
                 end
                 for _, s in ipairs(node.elseBlock.statements) do
                     check_stmt(s, else_scope)
@@ -1275,7 +1550,9 @@ check_stmt_raw = function(node, scope)
     end
 
     if kind == "ForInLoop" then
-        local kt, vt = T_ANY, T_ANY
+        -- generic/unknown iterators quarantine their variables: unknown,
+        -- provable through type() — never any (the last implicit-any)
+        local kt, vt = T_UNKNOWN, T_UNKNOWN
         local first = node.iterators[1]
         if first and first.type == "FunctionCall" and first.func.type == "Identifier"
            and (first.func.name == "ipairs" or first.func.name == "pairs") then
@@ -1393,6 +1670,7 @@ check_stmt_raw = function(node, scope)
         end
         ct.qname = ct.qname or node.name.name
         ct.is_final = node.is_final
+        ct.visibility = node.visibility
         node.qname = ct.qname
         local implements_ifaces = {}
         if node.extends_name then
@@ -1409,6 +1687,36 @@ check_stmt_raw = function(node, scope)
             end
             ct.base_class = base
             node.extends_qname = base.qname or base.name
+            -- SUPER-ARGUMENT CONTRACT (Java-style): a base whose constructor
+            -- takes parameters must receive them through the extends clause —
+            -- silently-nil base fields are not an outcome this language allows.
+            local param_scope = new_scope(scope)
+            for _, p in ipairs(node.params) do
+                if p.type == "Param" then
+                    declare(param_scope, p.name.name,
+                        p.param_type and from_ast(p.param_type, scope) or T_ANY)
+                end
+            end
+            local expected = base.ctor_params and #base.ctor_params or 0
+            local given = node.extends_args and #node.extends_args or 0
+            if expected > 0 and given == 0 then
+                type_error("class '" .. node.name.name
+                    .. "' must pass constructor arguments to '" .. base.name
+                    .. "' (expects " .. expected .. ")", node)
+            elseif given ~= expected then
+                type_error("'extends " .. base.name .. "' expects " .. expected
+                    .. " constructor argument(s), got " .. given, node)
+            end
+            for i, cp in ipairs(base.ctor_params or {}) do
+                local arg = node.extends_args and node.extends_args[i]
+                if arg then
+                    local at = infer_expr(arg, param_scope)
+                    if not compatible(at, cp.ptype) then
+                        type_error("super constructor argument " .. i
+                            .. " type mismatch", node)
+                    end
+                end
+            end
         end
         for _, iname in ipairs(node.implements_list or {}) do
             local iface = lookup(scope, iname.name)
@@ -1455,6 +1763,7 @@ check_stmt_raw = function(node, scope)
                 ct.methods[m.name.name] = fn_type
                 fn_type.overrides = m.overrides
                 fn_type.is_default = m.is_default
+                fn_type.visibility = m.visibility
                 fn_type.line = m.line
                 if m.is_default then
                     if not m.body or #m.body.statements == 0 then
@@ -1580,6 +1889,22 @@ check_stmt_raw = function(node, scope)
     type_error("checker: unknown statement '" .. tostring(kind) .. "'", node)
 end
 
+-- Checker.check_diagnostics(ast_nodes, meta) — LSP mode: return every
+-- warning plus the first type error, instead of aborting on it
+function Checker.check_diagnostics(ast_nodes, meta)
+    check_diagnostics = {}
+    check_diagnostics_handled = false
+    local ok, err = pcall(Checker.check, ast_nodes, meta)
+    local list = check_diagnostics
+    check_diagnostics = nil
+    -- type_error appended its own entry; only NON-type errors (from_ast
+    -- guards, internal guards) still need recording here
+    if not ok and err and not check_diagnostics_handled then
+        list[#list + 1] = { severity = "error", message = tostring(err):gsub("^.-: ", "") }
+    end
+    return list
+end
+
 -- Checker.check(ast_nodes) — entry point: a list of top-level statements
 function Checker.check(ast_nodes, meta)
     local global_scope = new_scope(nil)
@@ -1594,7 +1919,8 @@ function Checker.check(ast_nodes, meta)
         end
         -- lenient mode: report, don't refuse
         for _, m in ipairs(meta.incomplete) do
-            parse_warn("incomplete: " .. (m.reason or "no reason given") .. " (line " .. m.line .. ")")
+            checker_warn("incomplete: " .. (m.reason or "no reason given") .. " (line " .. m.line .. ")",
+                { line = m.line })
         end
     end
      -- Step 5: class registry — collect, build, wire

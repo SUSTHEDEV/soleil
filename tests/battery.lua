@@ -261,7 +261,7 @@ local adversarial = {
         "class R(n : number)\n    function twice(self : R) : number return self.n + self.n end\n"
      .. "    function quad(self : R) : number return self:twice() + self:twice() end\nend\nprint(R(3):quad())" },
     { name = "super chain 3 deep", want = "C+B", src =
-        "class A(x : number)\n    function who(self : A) : string return \"A\" end\nend\n"
+        "class A\n    function who(self : A) : string return \"A\" end\nend\n"
      .. "class B extends A\n    override function who(self : B) : string return \"B\" end\nend\n"
      .. "class C extends B\n    override function who(self : C) : string return \"C+\" .. super.who(self) end\nend\n"
      .. "print(C():who())" },

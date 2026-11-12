@@ -14,7 +14,7 @@ class Admin(role : string) extends Player("admin", 0)
 end
 
 object Registry
-    function put(self, k : string, v : number)
+    function put(self : Registry, k : string, v : number)
         print("stored " .. k)
     end
 end

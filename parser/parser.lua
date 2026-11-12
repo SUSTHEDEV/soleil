@@ -604,7 +604,12 @@ function parse(tokens, markers)
                 -- nil = consumed an empty statement (';'); it advanced i itself
             end
         end
-        return at(ast.Block(stmts), token.line)
+        -- a block entered past EOF (unterminated block opener) has a nil token:
+        -- report the last real token's line, not a crash
+        local line = (token and token.line)
+            or (tokens[#tokens] and tokens[#tokens].line)
+            or current_parse_line
+        return at(ast.Block(stmts), line)
     end
 
     function parse_expression(scope)        -- `or` (loosest)
